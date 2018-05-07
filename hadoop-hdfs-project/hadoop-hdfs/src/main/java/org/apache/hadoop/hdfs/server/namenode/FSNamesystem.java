@@ -49,6 +49,7 @@ import io.hops.metadata.hdfs.entity.RetryCacheEntry;
 import io.hops.metadata.hdfs.entity.SubTreeOperation;
 import io.hops.resolvingcache.Cache;
 import io.hops.security.Users;
+import io.hops.security.UsersGroups;
 import io.hops.transaction.EntityManager;
 import io.hops.transaction.context.RootINodeCache;
 import io.hops.transaction.handler.EncodingStatusOperationType;
@@ -191,6 +192,8 @@ import java.util.concurrent.TimeUnit;
 import static io.hops.transaction.lock.LockFactory.BLK;
 import static io.hops.transaction.lock.LockFactory.getInstance;
 import io.hops.transaction.lock.TransactionLockTypes;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BLOCK_SIZE_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BLOCK_SIZE_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BYTES_PER_CHECKSUM_DEFAULT;
@@ -319,10 +322,6 @@ public class FSNamesystem
       logAuditEvent(succeeded, getRemoteUser(), getRemoteIp(), cmd, src, dst,
           stat);
     }
-    if(isExternalInvocation()) {
-      logProvenanceEvent(succeeded, getRemoteUser(), getRemoteIp(), cmd, src, 
-        dst, stat);
-    }
   }
 
   private void logAuditEvent(boolean succeeded, UserGroupInformation ugi,
@@ -369,30 +368,57 @@ public class FSNamesystem
   /**
   * Provenance
   */
-  private static final long PROVENANCE_CACHE_EXPIRATION_TIME = 5000;
-  private static final long PROVENANCE_CACHE_MAX_SIZE = 1000;
-  private final com.github.benmanes.caffeine.cache.Cache<String, ProvenanceLogEntry> provenanceCache;
   
-  private void logProvenanceEvent(boolean succeeded, UserGroupInformation ugi,
-    InetAddress addr, String cmd, String src, String dst, HdfsFileStatus stat) {
-    int projectId = 0;
-    int datasetId = 0;
-    int inodeId = 0;
-    int userId = 0;
-    int logicalTime = 0;
+  private void logProvenanceEvent(String cmd, String src, String dst) {
+    if(!isExternalInvocation()) {
+      return;
+    }
+    ProvenanceLogEntry.Operation op;
+    switch(cmd) {
+      case "open" : op = ProvenanceLogEntry.Operation.READ; break;
+      default: return;
+    }
     
-    String key = projectId + "_" + datasetId + "_" + inodeId + "_" + userId; 
-    ProvenanceLogEntry ple = provenanceCache.getIfPresent(key);
-    if (ple == null) {
-      ProvenanceLogDataAccess<ProvenanceLogEntry> plda = null;
-      ple = new ProvenanceLogEntry(projectId, datasetId, inodeId, userId, logicalTime, 
-        ProvenanceLogEntry.Operation.READ);
-      provenanceCache.put(key, ple);
-      try {
-        plda.add(ple);
-      } catch (StorageException ex) {
-        LOG.error("provenance write error");
-      }
+    UserGroupInformation ugi;
+    INode inode;
+    INodeDirectory datasetDir;
+    
+    int userId;
+    try {
+      ugi = getRemoteUser();
+      inode = INodeFile.valueOf(dir.getINode(src), src);
+      userId = UsersGroups.getUserID(ugi.getUserName());
+      datasetDir = inode.getMetaEnabledParent();
+    } catch (IOException ex) {
+      LOG.error("provenance log error");
+      return;
+    }
+    
+    int appId = 0;
+    int logicalTime = inode.getLogicalTime();
+    String projectUser = ugi.getUserName();
+    String projectName;
+    String userName;
+    if(projectUser.contains("__")) {
+      String[] userParts = projectUser.split(dst);
+      projectName = userParts[0];
+      userName = userParts[1];
+    } else {
+      LOG.error("provenance log error");
+      return;
+    }
+    String datasetName = datasetDir.getLocalName();
+    
+    ProvenanceLogEntry ple = new ProvenanceLogEntry(inode.id, userId, appId,
+      logicalTime, projectName, datasetName, userName, op);
+    try {
+      EntityManager.add(ple);
+    } catch (StorageException ex) {
+      LOG.error("provenance log error");
+      return;
+    } catch (TransactionContextException ex) {
+      LOG.error("provenance log error");
+      return;
     }
   }
   /**
@@ -679,10 +705,6 @@ public class FSNamesystem
           auditLoggers.get(0) instanceof DefaultAuditLogger;
       this.aclConfigFlag = new AclConfigFlag(conf);
       this.retryCache = ignoreRetryCache ? null : initRetryCache(conf);
-      this.provenanceCache = com.github.benmanes.caffeine.cache.Caffeine.newBuilder()
-        .expireAfterWrite(PROVENANCE_CACHE_EXPIRATION_TIME, TimeUnit.MILLISECONDS)
-        .maximumSize(PROVENANCE_CACHE_MAX_SIZE)
-        .build();
     } catch (IOException | RuntimeException e) {
       LOG.error(getClass().getSimpleName() + " initialization failed.", e);
       close();

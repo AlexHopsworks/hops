@@ -60,6 +60,7 @@ import io.hops.metadata.hdfs.dal.LeasePathDataAccess;
 import io.hops.metadata.hdfs.dal.OngoingSubTreeOpsDataAccess;
 import io.hops.metadata.hdfs.dal.MetadataLogDataAccess;
 import io.hops.metadata.hdfs.dal.PendingBlockDataAccess;
+import io.hops.metadata.hdfs.dal.ProvenanceLogDataAccess;
 import io.hops.metadata.hdfs.dal.QuotaUpdateDataAccess;
 import io.hops.metadata.hdfs.dal.ReplicaDataAccess;
 import io.hops.metadata.hdfs.dal.ReplicaUnderConstructionDataAccess;
@@ -74,6 +75,7 @@ import io.hops.metadata.hdfs.entity.Replica;
 import io.hops.metadata.hdfs.entity.InvalidatedBlock;
 import io.hops.metadata.hdfs.entity.LeasePath;
 import io.hops.metadata.hdfs.entity.MetadataLogEntry;
+import io.hops.metadata.hdfs.entity.ProvenanceLogEntry;
 import io.hops.metadata.hdfs.entity.QuotaUpdate;
 import io.hops.metadata.hdfs.entity.RetryCacheEntry;
 import io.hops.metadata.hdfs.entity.SubTreeOperation;
@@ -98,6 +100,7 @@ import io.hops.transaction.context.LeaseContext;
 import io.hops.transaction.context.LeasePathContext;
 import io.hops.transaction.context.MetadataLogContext;
 import io.hops.transaction.context.PendingBlockContext;
+import io.hops.transaction.context.ProvenanceLogContext;
 import io.hops.transaction.context.QuotaUpdateContext;
 import io.hops.transaction.context.ReplicaContext;
 import io.hops.transaction.context.ReplicaUnderConstructionContext;
@@ -328,6 +331,10 @@ public class HdfsStorageFactory {
 
     entityContexts.put(RetryCacheEntry.class, new RetryCacheEntryContext(
         (RetryCacheEntryDataAccess) getDataAccess(RetryCacheEntryDataAccess.class)));
+    
+        entityContexts.put(ProvenanceLogEntry.class, new ProvenanceLogContext(
+          (ProvenanceLogDataAccess) getDataAccess(ProvenanceLogDataAccess.class)));
+        
         return entityContexts;
       }
 
