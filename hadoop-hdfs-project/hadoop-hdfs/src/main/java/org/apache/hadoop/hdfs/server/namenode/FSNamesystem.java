@@ -1299,6 +1299,7 @@ public class FSNamesystem
             };
     LocatedBlocks locatedBlocks = (LocatedBlocks) getBlockLocationsHandler.handle(this);
     logAuditEvent(true, "open", src);
+    logProvenanceEvent("open", src, src);
     return locatedBlocks;
   }
 
