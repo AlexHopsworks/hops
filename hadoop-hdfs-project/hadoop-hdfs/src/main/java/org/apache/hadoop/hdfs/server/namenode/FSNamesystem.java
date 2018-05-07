@@ -33,6 +33,7 @@ import io.hops.metadata.hdfs.dal.AceDataAccess;
 import io.hops.metadata.hdfs.dal.BlockChecksumDataAccess;
 import io.hops.metadata.hdfs.dal.EncodingStatusDataAccess;
 import io.hops.metadata.hdfs.dal.INodeDataAccess;
+import io.hops.metadata.hdfs.dal.ProvenanceLogDataAccess;
 import io.hops.metadata.hdfs.dal.RetryCacheEntryDataAccess;
 import io.hops.metadata.hdfs.dal.SafeBlocksDataAccess;
 import io.hops.metadata.hdfs.entity.Ace;
@@ -43,6 +44,7 @@ import io.hops.metadata.hdfs.entity.INodeIdentifier;
 import io.hops.metadata.hdfs.entity.LeasePath;
 import io.hops.metadata.hdfs.entity.MetadataLogEntry;
 import io.hops.metadata.hdfs.entity.ProjectedINode;
+import io.hops.metadata.hdfs.entity.ProvenanceLogEntry;
 import io.hops.metadata.hdfs.entity.RetryCacheEntry;
 import io.hops.metadata.hdfs.entity.SubTreeOperation;
 import io.hops.resolvingcache.Cache;
@@ -317,6 +319,10 @@ public class FSNamesystem
       logAuditEvent(succeeded, getRemoteUser(), getRemoteIp(), cmd, src, dst,
           stat);
     }
+    if(isExternalInvocation()) {
+      logProvenanceEvent(succeeded, getRemoteUser(), getRemoteIp(), cmd, src, 
+        dst, stat);
+    }
   }
 
   private void logAuditEvent(boolean succeeded, UserGroupInformation ugi,
@@ -360,6 +366,39 @@ public class FSNamesystem
   public static final Log auditLog =
       LogFactory.getLog(FSNamesystem.class.getName() + ".audit");
 
+  /**
+  * Provenance
+  */
+  private static final long PROVENANCE_CACHE_EXPIRATION_TIME = 5000;
+  private static final long PROVENANCE_CACHE_MAX_SIZE = 1000;
+  private final com.github.benmanes.caffeine.cache.Cache<String, ProvenanceLogEntry> provenanceCache;
+  
+  private void logProvenanceEvent(boolean succeeded, UserGroupInformation ugi,
+    InetAddress addr, String cmd, String src, String dst, HdfsFileStatus stat) {
+    int projectId = 0;
+    int datasetId = 0;
+    int inodeId = 0;
+    int userId = 0;
+    int logicalTime = 0;
+    
+    String key = projectId + "_" + datasetId + "_" + inodeId + "_" + userId; 
+    ProvenanceLogEntry ple = provenanceCache.getIfPresent(key);
+    if (ple == null) {
+      ProvenanceLogDataAccess<ProvenanceLogEntry> plda = null;
+      ple = new ProvenanceLogEntry(projectId, datasetId, inodeId, userId, logicalTime, 
+        ProvenanceLogEntry.Operation.READ);
+      provenanceCache.put(key, ple);
+      try {
+        plda.add(ple);
+      } catch (StorageException ex) {
+        LOG.error("provenance write error");
+      }
+    }
+  }
+  /**
+   * 
+   */
+  
   static final int DEFAULT_MAX_CORRUPT_FILEBLOCKS_RETURNED = 100;
   static int BLOCK_DELETION_INCREMENT = 1000;
 
@@ -640,6 +679,10 @@ public class FSNamesystem
           auditLoggers.get(0) instanceof DefaultAuditLogger;
       this.aclConfigFlag = new AclConfigFlag(conf);
       this.retryCache = ignoreRetryCache ? null : initRetryCache(conf);
+      this.provenanceCache = com.github.benmanes.caffeine.cache.Caffeine.newBuilder()
+        .expireAfterWrite(PROVENANCE_CACHE_EXPIRATION_TIME, TimeUnit.MILLISECONDS)
+        .maximumSize(PROVENANCE_CACHE_MAX_SIZE)
+        .build();
     } catch (IOException | RuntimeException e) {
       LOG.error(getClass().getSimpleName() + " initialization failed.", e);
       close();
