@@ -394,11 +394,13 @@ public class FSNamesystem
       return;
     }
     
-    int appId = 0;
+    String appId = "";
     int logicalTime = inode.getLogicalTime();
     String projectUser = ugi.getUserName();
     String projectName;
     String userName;
+    String inodeName = inode.getLocalName();
+    int parentId = inode.getParentId();
     if(projectUser.contains("__")) {
       String[] userParts = projectUser.split(dst);
       projectName = userParts[0];
@@ -410,7 +412,7 @@ public class FSNamesystem
     String datasetName = datasetDir.getLocalName();
     
     ProvenanceLogEntry ple = new ProvenanceLogEntry(inode.id, userId, appId,
-      logicalTime, projectName, datasetName, userName, op);
+      logicalTime, parentId, projectName, datasetName, inodeName, userName, op);
     try {
       EntityManager.add(ple);
     } catch (StorageException ex) {

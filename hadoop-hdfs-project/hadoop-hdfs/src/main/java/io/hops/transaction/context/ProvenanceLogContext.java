@@ -22,6 +22,7 @@ import io.hops.exception.TransactionContextException;
 import io.hops.metadata.hdfs.dal.ProvenanceLogDataAccess;
 import io.hops.metadata.hdfs.entity.ProvenanceLogEntry;
 import io.hops.transaction.lock.TransactionLocks;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
 public class ProvenanceLogContext extends BaseEntityContext<ProvenanceLogContext.DBKey, ProvenanceLogEntry> {
@@ -41,11 +42,11 @@ public class ProvenanceLogContext extends BaseEntityContext<ProvenanceLogContext
 
   class CacheKey {
 
-    private int inodeId;
-    private int userId;
-    private int appId;
+    private final int inodeId;
+    private final int userId;
+    private final String appId;
 
-    public CacheKey(int inodeId, int userId, int appId) {
+    public CacheKey(int inodeId, int userId, String appId) {
       this.inodeId = inodeId;
       this.userId = userId;
       this.appId = appId;
@@ -54,9 +55,9 @@ public class ProvenanceLogContext extends BaseEntityContext<ProvenanceLogContext
     @Override
     public int hashCode() {
       int hash = 7;
-      hash = 79 * hash + this.inodeId;
-      hash = 79 * hash + this.userId;
-      hash = 79 * hash + this.appId;
+      hash = 37 * hash + this.inodeId;
+      hash = 37 * hash + this.userId;
+      hash = 37 * hash + Objects.hashCode(this.appId);
       return hash;
     }
 
@@ -78,7 +79,7 @@ public class ProvenanceLogContext extends BaseEntityContext<ProvenanceLogContext
       if (this.userId != other.userId) {
         return false;
       }
-      if (this.appId != other.appId) {
+      if (!Objects.equals(this.appId, other.appId)) {
         return false;
       }
       return true;
@@ -87,12 +88,12 @@ public class ProvenanceLogContext extends BaseEntityContext<ProvenanceLogContext
 
   class DBKey {
 
-    private int inodeId;
-    private int userId;
-    private int appId;
-    private long timestamp;
+    private final int inodeId;
+    private final int userId;
+    private final String appId;
+    private final long timestamp;
 
-    public DBKey(int inodeId, int userId, int appId, long timestamp) {
+    public DBKey(int inodeId, int userId, String appId, long timestamp) {
       this.inodeId = inodeId;
       this.userId = userId;
       this.appId = appId;
@@ -102,14 +103,14 @@ public class ProvenanceLogContext extends BaseEntityContext<ProvenanceLogContext
     private CacheKey getCacheKey() {
       return new CacheKey(inodeId, userId, appId);
     }
-    
+
     @Override
     public int hashCode() {
-      int hash = 7;
-      hash = 71 * hash + this.inodeId;
-      hash = 71 * hash + this.userId;
-      hash = 71 * hash + this.appId;
-      hash = 71 * hash + (int) (this.timestamp ^ (this.timestamp >>> 32));
+      int hash = 5;
+      hash = 53 * hash + this.inodeId;
+      hash = 53 * hash + this.userId;
+      hash = 53 * hash + Objects.hashCode(this.appId);
+      hash = 53 * hash + (int) (this.timestamp ^ (this.timestamp >>> 32));
       return hash;
     }
 
@@ -131,15 +132,14 @@ public class ProvenanceLogContext extends BaseEntityContext<ProvenanceLogContext
       if (this.userId != other.userId) {
         return false;
       }
-      if (this.appId != other.appId) {
+      if (this.timestamp != other.timestamp) {
         return false;
       }
-      if (this.timestamp != other.timestamp) {
+      if (!Objects.equals(this.appId, other.appId)) {
         return false;
       }
       return true;
     }
-
   }
 
   public ProvenanceLogContext(ProvenanceLogDataAccess dataAccess) {
