@@ -137,11 +137,6 @@ public class BlockManager {
   static final Log LOG = LogFactory.getLog(BlockManager.class);
   public static final Log blockLog = NameNode.blockStateChangeLog;
 
-  /**
-   * Default load factor of map
-   */
-  public static final float DEFAULT_MAP_LOAD_FACTOR = 0.75f;
-
   private final Namesystem namesystem;
 
   private final DatanodeManager datanodeManager;
@@ -913,6 +908,7 @@ public class BlockManager {
               namesystem.getBlockPoolId(),
               DFSConfigKeys.DFS_DATANODE_DEFAULT_PORT,
               DFSConfigKeys.DFS_DATANODE_HTTP_DEFAULT_PORT,
+              DFSConfigKeys.DFS_DATANODE_HTTPS_DEFAULT_PORT,
               DFSConfigKeys.DFS_DATANODE_IPC_DEFAULT_PORT);
       DatanodeInfo phantomDatanode = new DatanodeInfo(phantomDatanodID);
       machines[0] = phantomDatanode;

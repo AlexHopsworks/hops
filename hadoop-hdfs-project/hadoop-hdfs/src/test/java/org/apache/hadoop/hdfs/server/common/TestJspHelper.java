@@ -17,6 +17,13 @@
  */
 package org.apache.hadoop.hdfs.server.common;
 
+import com.google.common.base.Strings;
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+import io.hops.metadata.StorageMap;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
@@ -49,7 +56,17 @@ import javax.xml.parsers.ParserConfigurationException;
 import java.io.IOException;
 import java.io.StringReader;
 import java.net.InetSocketAddress;
+import java.text.MessageFormat;
+import java.util.ArrayList;
+import org.apache.hadoop.hdfs.protocol.DatanodeID;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
+import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
+import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
+import org.apache.hadoop.hdfs.server.protocol.StorageReport;
+import org.apache.hadoop.io.DataInputBuffer;
+import org.apache.hadoop.io.DataOutputBuffer;
 import org.apache.hadoop.security.authorize.DefaultImpersonationProvider;
+import org.mockito.Mockito;
 
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -445,4 +462,192 @@ public class TestJspHelper {
           ugi.getAuthenticationMethod());
     }
   }
+  
+  @Test
+  public void testSortNodeByFields() throws Exception {
+    DatanodeID dnId1 = new DatanodeID("127.0.0.1", "localhost1", "datanode1",
+        1234, 2345, 3456, 4567);
+    DatanodeID dnId2 = new DatanodeID("127.0.0.2", "localhost2", "datanode2",
+        1235, 2346, 3457, 4568);
+    
+    // Setup DatanodeDescriptors with one storage each.
+    StorageMap storageMap = mock(StorageMap.class);
+    DatanodeDescriptor dnDesc1 = new DatanodeDescriptor(storageMap, dnId1, "rack1");
+    DatanodeDescriptor dnDesc2 = new DatanodeDescriptor(storageMap, dnId2, "rack2");
+
+    // Update the DatanodeDescriptors with their attached storages.
+    BlockManagerTestUtil.updateStorage(dnDesc1, new DatanodeStorage("dnStorage1"));
+    BlockManagerTestUtil.updateStorage(dnDesc2, new DatanodeStorage("dnStorage2"));
+
+    DatanodeStorage dns1 = new DatanodeStorage("dnStorage1");
+    DatanodeStorage dns2 = new DatanodeStorage("dnStorage2");
+    
+    StorageReport[] report1 = new StorageReport[] {
+        new StorageReport(dns1, false, 1024, 100, 924, 100)
+    };
+    StorageReport[] report2 = new StorageReport[] {
+        new StorageReport(dns2, false, 2500, 200, 1848, 200)
+    };
+    dnDesc1.updateHeartbeat(report1, 10, 2);
+    dnDesc2.updateHeartbeat(report2, 20, 1);
+
+    ArrayList<DatanodeDescriptor> live = new ArrayList<DatanodeDescriptor>();
+    live.add(dnDesc1);
+    live.add(dnDesc2);
+
+    // Test sorting by failed volumes
+    JspHelper.sortNodeList(live, "volfails", "ASC");
+    Assert.assertEquals(dnDesc2, live.get(0));
+    Assert.assertEquals(dnDesc1, live.get(1));
+    JspHelper.sortNodeList(live, "volfails", "DSC");
+    Assert.assertEquals(dnDesc1, live.get(0));
+    Assert.assertEquals(dnDesc2, live.get(1));
+
+    // Test sorting by Blockpool used
+    JspHelper.sortNodeList(live, "bpused", "ASC");
+    Assert.assertEquals(dnDesc1, live.get(0));
+    Assert.assertEquals(dnDesc2, live.get(1));
+    JspHelper.sortNodeList(live, "bpused", "DSC");
+    Assert.assertEquals(dnDesc2, live.get(0));
+    Assert.assertEquals(dnDesc1, live.get(1));
+
+    // Test sorting by Percentage Blockpool used
+    JspHelper.sortNodeList(live, "pcbpused", "ASC");
+    Assert.assertEquals(dnDesc2, live.get(0));
+    Assert.assertEquals(dnDesc1, live.get(1));
+    JspHelper.sortNodeList(live, "pcbpused", "DSC");
+    Assert.assertEquals(dnDesc1, live.get(0));
+    Assert.assertEquals(dnDesc2, live.get(1));
+    
+    //unexisted field comparition is d1.getHostName().compareTo(d2.getHostName());    
+    JspHelper.sortNodeList(live, "unexists", "ASC");
+    Assert.assertEquals(dnDesc1, live.get(0));
+    Assert.assertEquals(dnDesc2, live.get(1));
+    
+    JspHelper.sortNodeList(live, "unexists", "DSC");
+    Assert.assertEquals(dnDesc2, live.get(0));
+    Assert.assertEquals(dnDesc1, live.get(1));  
+    
+    // test sorting by capacity
+    JspHelper.sortNodeList(live, "capacity", "ASC");
+    Assert.assertEquals(dnDesc1, live.get(0));
+    Assert.assertEquals(dnDesc2, live.get(1));
+    
+    JspHelper.sortNodeList(live, "capacity", "DSC");
+    Assert.assertEquals(dnDesc2, live.get(0));
+    Assert.assertEquals(dnDesc1, live.get(1));
+
+    // test sorting by used
+    JspHelper.sortNodeList(live, "used", "ASC");
+    Assert.assertEquals(dnDesc1, live.get(0));
+    Assert.assertEquals(dnDesc2, live.get(1));
+    
+    JspHelper.sortNodeList(live, "used", "DSC");
+    Assert.assertEquals(dnDesc2, live.get(0));
+    Assert.assertEquals(dnDesc1, live.get(1)); 
+    
+    // test sorting by nondfsused
+    JspHelper.sortNodeList(live, "nondfsused", "ASC");
+    Assert.assertEquals(dnDesc1, live.get(0));
+    Assert.assertEquals(dnDesc2, live.get(1));
+    
+    JspHelper.sortNodeList(live, "nondfsused", "DSC");
+    Assert.assertEquals(dnDesc2, live.get(0));
+    Assert.assertEquals(dnDesc1, live.get(1));
+   
+    // test sorting by remaining
+    JspHelper.sortNodeList(live, "remaining", "ASC");
+    Assert.assertEquals(dnDesc1, live.get(0));
+    Assert.assertEquals(dnDesc2, live.get(1));
+    
+    JspHelper.sortNodeList(live, "remaining", "DSC");
+    Assert.assertEquals(dnDesc2, live.get(0));
+    Assert.assertEquals(dnDesc1, live.get(1));
+  }
+  
+  @Test
+  public void testPrintMethods() throws IOException {
+    JspWriter out = mock(JspWriter.class);      
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    
+    final StringBuffer buffer = new StringBuffer();
+    
+    ArgumentCaptor<String> arg = ArgumentCaptor.forClass(String.class);
+    doAnswer(new Answer<Object>() {      
+      @Override
+      public Object answer(InvocationOnMock invok) {
+        Object[] args = invok.getArguments();
+        buffer.append((String)args[0]);
+        return null;
+      }
+    }).when(out).print(arg.capture());
+    
+    
+    JspHelper.createTitle(out, req, "testfile.txt");
+    Mockito.verify(out, Mockito.times(1)).print(Mockito.anyString());
+    
+    JspHelper.addTableHeader(out);
+    Mockito.verify(out, Mockito.times(1 + 2)).print(Mockito.anyString());                  
+     
+    JspHelper.addTableRow(out, new String[] {" row11", "row12 "});
+    Mockito.verify(out, Mockito.times(1 + 2 + 4)).print(Mockito.anyString());      
+    
+    JspHelper.addTableRow(out, new String[] {" row11", "row12 "}, 3);
+    Mockito.verify(out, Mockito.times(1 + 2 + 4 + 4)).print(Mockito.anyString());
+      
+    JspHelper.addTableRow(out, new String[] {" row21", "row22"});
+    Mockito.verify(out, Mockito.times(1 + 2 + 4 + 4 + 4)).print(Mockito.anyString());      
+      
+    JspHelper.addTableFooter(out);
+    Mockito.verify(out, Mockito.times(1 + 2 + 4 + 4 + 4 + 1)).print(Mockito.anyString());
+    
+    assertFalse(Strings.isNullOrEmpty(buffer.toString()));               
+  }
+  
+  @Test
+  public void testReadWriteReplicaState() {
+    try {
+      DataOutputBuffer out = new DataOutputBuffer();
+      DataInputBuffer in = new DataInputBuffer();
+      for (HdfsServerConstants.ReplicaState repState : HdfsServerConstants.ReplicaState
+          .values()) {
+        repState.write(out);
+        in.reset(out.getData(), out.getLength());
+        HdfsServerConstants.ReplicaState result = HdfsServerConstants.ReplicaState
+            .read(in);
+        assertTrue("testReadWrite error !!!", repState == result);
+        out.reset();
+        in.reset();
+      }
+    } catch (Exception ex) {
+      fail("testReadWrite ex error ReplicaState");
+    }
+  }
+
+  @Test
+  public void testUpgradeStatusReport() {
+    short status = 6;
+    int version = 15;
+    String EXPECTED__NOTF_PATTERN = "Upgrade for version {0} has been completed.\nUpgrade is not finalized.";
+    String EXPECTED_PATTERN = "Upgrade for version {0} is in progress. Status = {1}%";
+
+    UpgradeStatusReport upgradeStatusReport = new UpgradeStatusReport(version,
+        status, true);
+    assertTrue(upgradeStatusReport.getVersion() == version);
+    assertTrue(upgradeStatusReport.getUpgradeStatus() == status);
+    assertTrue(upgradeStatusReport.isFinalized());
+
+    assertEquals(MessageFormat.format(EXPECTED_PATTERN, version, status),
+        upgradeStatusReport.getStatusText(true));
+
+    status += 100;
+    upgradeStatusReport = new UpgradeStatusReport(version, status, false);
+    assertFalse(upgradeStatusReport.isFinalized());
+    assertTrue(upgradeStatusReport.toString().equals(
+        MessageFormat.format(EXPECTED__NOTF_PATTERN, version)));
+    assertTrue(upgradeStatusReport.getStatusText(false).equals(
+        MessageFormat.format(EXPECTED__NOTF_PATTERN, version)));
+    assertTrue(upgradeStatusReport.getStatusText(true).equals(
+        MessageFormat.format(EXPECTED__NOTF_PATTERN, version)));
+  } 
 }

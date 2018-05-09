@@ -175,7 +175,9 @@ import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_WRITE_PACKET_SIZE_
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DATANODE_SOCKET_WRITE_TIMEOUT_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_REPLICATION_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_REPLICATION_KEY;
+import org.apache.hadoop.hdfs.client.ClientMmapManager;
 import org.apache.hadoop.hdfs.server.datanode.CachingStrategy;
+import org.apache.hadoop.ipc.RetriableException;
 
 /**
  * *****************************************************
@@ -223,7 +225,43 @@ public class DFSClient implements java.io.Closeable {
   private boolean shouldUseLegacyBlockReaderLocal;
   private final CachingStrategy defaultReadCachingStrategy;
   private final CachingStrategy defaultWriteCachingStrategy;
+  private ClientMmapManager mmapManager;
+  
+  private static final ClientMmapManagerFactory MMAP_MANAGER_FACTORY =
+      new ClientMmapManagerFactory();
 
+  private static final class ClientMmapManagerFactory {
+    private ClientMmapManager mmapManager = null;
+    /**
+     * Tracks the number of users of mmapManager.
+     */
+    private int refcnt = 0;
+
+    synchronized ClientMmapManager get(Configuration conf) {
+      if (refcnt++ == 0) {
+        mmapManager = ClientMmapManager.fromConf(conf);
+      } else {
+        String mismatches = mmapManager.verifyConfigurationMatches(conf);
+        if (!mismatches.isEmpty()) {
+          LOG.warn("The ClientMmapManager settings you specified " +
+            "have been ignored because another thread created the " +
+            "ClientMmapManager first.  " + mismatches);
+        }
+      }
+      return mmapManager;
+    }
+    
+    synchronized void unref(ClientMmapManager mmapManager) {
+      if (this.mmapManager != mmapManager) {
+        throw new IllegalArgumentException();
+      }
+      if (--refcnt == 0) {
+        IOUtils.cleanup(LOG, mmapManager);
+        mmapManager = null;
+      }
+    }
+  }
+  
   /**
    * DFSClient configuration
    */
@@ -582,7 +620,8 @@ public class DFSClient implements java.io.Closeable {
         new CachingStrategy(readDropBehind, readahead);
     this.defaultWriteCachingStrategy =
         new CachingStrategy(writeDropBehind, readahead);
-
+    this.mmapManager = MMAP_MANAGER_FACTORY.get(conf);
+    
     this.MAX_RPC_RETRIES =
         conf.getInt(DFSConfigKeys.DFS_CLIENT_RETRIES_ON_FAILURE_KEY,
             DFSConfigKeys.DFS_CLIENT_RETRIES_ON_FAILURE_DEFAULT);
@@ -824,9 +863,12 @@ public class DFSClient implements java.io.Closeable {
    * Abort and release resources held.  Ignore all errors.
    */
   void abort() {
+    if (mmapManager != null) {
+      MMAP_MANAGER_FACTORY.unref(mmapManager);
+      mmapManager = null;
+    }
     clientRunning = false;
     closeAllFilesBeingWritten(true);
-
     try {
       // remove reference to this client and stop the renewer,
       // if there is no more clients under the renewer.
@@ -872,6 +914,10 @@ public class DFSClient implements java.io.Closeable {
    */
   @Override
   public synchronized void close() throws IOException {
+    if (mmapManager != null) {
+      MMAP_MANAGER_FACTORY.unref(mmapManager);
+      mmapManager = null;
+    }
     if (clientRunning) {
       closeAllFilesBeingWritten(false);
       clientRunning = false;
@@ -3059,6 +3105,12 @@ public class DFSClient implements java.io.Closeable {
           } catch (InterruptedException ex) {
           }
           continue;
+        } else if(getWrappedRetriableException(e) != null) {
+          try {
+            Thread.sleep(waitTime);
+            waitTime *= 2;
+          } catch (InterruptedException ex) {
+          }
         } else {
           break;
         }
@@ -3068,6 +3120,16 @@ public class DFSClient implements java.io.Closeable {
     throw exception; // Did not return so RPC failed
   }
 
+  private static RetriableException getWrappedRetriableException(Exception e) {
+    if (!(e instanceof RemoteException)) {
+      return null;
+    }
+    Exception unwrapped = ((RemoteException)e).unwrapRemoteException(
+        RetriableException.class);
+    return unwrapped instanceof RetriableException ? 
+        (RetriableException) unwrapped : null;
+  }
+  
   /**
    * Ping the name node to see if there is a connection
    * -- A connection won't exist if it gives an IOException of type
@@ -3598,5 +3660,10 @@ public class DFSClient implements java.io.Closeable {
 
   public CachingStrategy getDefaultWriteCachingStrategy() {
     return defaultWriteCachingStrategy;
+  }
+  
+  @VisibleForTesting
+  public ClientMmapManager getMmapManager() {
+    return mmapManager;
   }
 }

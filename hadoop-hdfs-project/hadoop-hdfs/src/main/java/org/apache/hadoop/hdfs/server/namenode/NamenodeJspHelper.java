@@ -66,6 +66,7 @@ import java.net.URLEncoder;
 import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -112,6 +113,10 @@ class NamenodeJspHelper {
   }
 
   static String getRollingUpgradeText(FSNamesystem fsn) {
+    if (fsn == null) {
+      return "";
+    }
+    
     DatanodeManager dm = fsn.getBlockManager().getDatanodeManager();
     Map<String, Integer> list = dm.getDatanodesSoftwareVersions();
     if(list.size() > 1) {
@@ -597,26 +602,22 @@ class NamenodeJspHelper {
         (Configuration) context.getAttribute(JspHelper.CURRENT_CONF);
     // We can't redirect if there isn't a DN to redirect to.
     // Lets instead show a proper error message.
-    if (nn.getNamesystem().getNumLiveDataNodes() < 1) {
+    FSNamesystem fsn = nn.getNamesystem();
+    
+    DatanodeID datanode = null;
+    if (fsn != null && fsn.getNumLiveDataNodes() >= 1) {
+      datanode = getRandomDatanode(nn);
+    }
+
+    if (datanode == null) {
       throw new IOException("Can't browse the DFS since there are no " +
           "live nodes available to redirect to.");
     }
-    final DatanodeID datanode = getRandomDatanode(nn);
-    ;
+
     UserGroupInformation ugi = JspHelper.getUGI(context, request, conf);
+    // if the user is defined, get a delegation token and stringify it
     String tokenString =
         getDelegationToken(nn.getRpcServer(), request, conf, ugi);
-    // if the user is defined, get a delegation token and stringify it
-    final String redirectLocation;
-    final String nodeToRedirect;
-    int redirectPort;
-    if (datanode != null) {
-      nodeToRedirect = datanode.getIpAddr();
-      redirectPort = datanode.getInfoPort();
-    } else {
-      nodeToRedirect = nn.getHttpAddress().getHostName();
-      redirectPort = nn.getHttpAddress().getPort();
-    }
 
     InetSocketAddress rpcAddr = nn.getNameNodeAddress();
     String rpcHost = rpcAddr.getAddress().isAnyLocalAddress() ?
@@ -624,21 +625,28 @@ class NamenodeJspHelper {
         rpcAddr.getAddress().getHostAddress();
     String addr = rpcHost + ":" + rpcAddr.getPort();
 
-    String fqdn = InetAddress.getByName(nodeToRedirect).getCanonicalHostName();
-    int httpPort = -1;
-    if (nn.conf.getBoolean(DFSConfigKeys.DFS_HTTPS_ENABLE_KEY, DFSConfigKeys.DFS_HTTPS_ENABLE_DEFAULT)) {
-      httpPort = nn.conf.getInt(DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_KEY, DFSConfigKeys.DFS_DATANODE_HTTPS_DEFAULT_PORT);
-    } else {
-      httpPort = nn.getHttpAddress().getPort();
-    }
-    redirectLocation =
-        HttpConfig2.getSchemePrefix() + fqdn + ":" + redirectPort +
+    final String redirectLocation =
+        JspHelper.Url.url(request.getScheme(), datanode) +
             "/browseDirectory.jsp?namenodeInfoPort=" +
-            httpPort + "&dir=/" +
+            request.getServerPort() + "&dir=/" +
             (tokenString == null ? "" :
                 JspHelper.getDelegationTokenUrlParam(tokenString)) +
             JspHelper.getUrlParam(JspHelper.NAMENODE_ADDRESS, addr);
     resp.sendRedirect(redirectLocation);
+  }
+
+  /**
+   * Returns a descriptive label for the running NameNode.  If the NameNode has
+   * initialized to the point of running its RPC server, then this label consists
+   * of the host and port of the RPC server.  Otherwise, the label is a message
+   * stating that the NameNode is still initializing.
+   * 
+   * @param nn NameNode to describe
+   * @return String NameNode label
+   */
+  static String getNameNodeLabel(NameNode nn) {
+    return nn.getRpcServer() != null ? nn.getNameNodeAddressHostPortString() :
+      "initializing";
   }
 
   static class NodeListJsp {
@@ -678,12 +686,11 @@ class NamenodeJspHelper {
     }
 
     private void generateNodeDataHeader(JspWriter out, DatanodeDescriptor d,
-        String suffix, boolean alive, int nnHttpPort, String nnaddr)
+        String suffix, boolean alive, int nnInfoPort, String nnaddr, String scheme)
         throws IOException {
       // from nn_browsedfscontent.jsp:
-      String url = HttpConfig2.getSchemePrefix() + d.getHostName() + ":" +
-          d.getInfoPort() + "/browseDirectory.jsp?namenodeInfoPort=" +
-          nnHttpPort + "&dir=" + URLEncoder.encode("/", "UTF-8") +
+      String url = "///" + JspHelper.Url.authority(scheme, d) + "/browseDirectory.jsp?namenodeInfoPort=" +
+          nnInfoPort + "&dir=" + URLEncoder.encode("/", "UTF-8") +
           JspHelper.getUrlParam(JspHelper.NAMENODE_ADDRESS, nnaddr);
 
       String name = d.getXferAddrWithHostname();
@@ -700,9 +707,9 @@ class NamenodeJspHelper {
     }
 
     void generateDecommissioningNodeData(JspWriter out, DatanodeDescriptor d,
-        String suffix, boolean alive, int nnHttpPort, String nnaddr)
+        String suffix, boolean alive, int nnInfoPort, String nnaddr, String scheme)
         throws IOException {
-      generateNodeDataHeader(out, d, suffix, alive, nnHttpPort, nnaddr);
+      generateNodeDataHeader(out, d, suffix, alive, nnInfoPort, nnaddr, scheme);
       if (!alive) {
         return;
       }
@@ -727,7 +734,7 @@ class NamenodeJspHelper {
     }
     
     void generateNodeData(JspWriter out, DatanodeDescriptor d, String suffix,
-        boolean alive, int nnHttpPort, String nnaddr) throws IOException {
+        boolean alive, int nnInfoPort, String nnaddr, String scheme) throws IOException {
       /*
        * Say the datanode is dn1.hadoop.apache.org with ip 192.168.0.5 we use:
        * 1) d.getHostName():d.getRpcServerPort() to display. Domain and port are stripped
@@ -739,7 +746,7 @@ class NamenodeJspHelper {
        * interact with datanodes.
        */
 
-      generateNodeDataHeader(out, d, suffix, alive, nnHttpPort, nnaddr);
+      generateNodeDataHeader(out, d, suffix, alive, nnInfoPort, nnaddr, scheme);
       if (!alive) {
         out.print("<td class=\"decommissioned\"> " +
             d.isDecommissioned() + "\n");
@@ -792,16 +799,17 @@ class NamenodeJspHelper {
         HttpServletRequest request) throws IOException {
       final NameNode nn = NameNodeHttpServer.getNameNodeFromContext(context);
       final FSNamesystem ns = nn.getNamesystem();
+      if (ns == null) {
+        return;
+      }
       final DatanodeManager dm = ns.getBlockManager().getDatanodeManager();
 
       final List<DatanodeDescriptor> live = new ArrayList<>();
       final List<DatanodeDescriptor> dead = new ArrayList<>();
       dm.fetchDatanodes(live, dead, true);
 
-      InetSocketAddress nnSocketAddress = (InetSocketAddress) context
-          .getAttribute(NameNodeHttpServer.NAMENODE_ADDRESS_ATTRIBUTE_KEY);
-      String nnaddr = nnSocketAddress.getAddress().getHostAddress() + ":" +
-          nnSocketAddress.getPort();
+      String nnaddr = nn.getServiceRpcAddress().getAddress().getHostName() + ":"
+          + nn.getServiceRpcAddress().getPort();
 
       whatNodes = request.getParameter("whatNodes"); // show only live or only
       // dead nodes
@@ -839,16 +847,12 @@ class NamenodeJspHelper {
 
       counterReset();
 
-      try {
-        Thread.sleep(1000);
-      } catch (InterruptedException e) {
-      }
 
       if (live.isEmpty() && dead.isEmpty()) {
         out.print("There are no datanodes in the cluster");
       } else {
 
-        int nnHttpPort = nn.getHttpAddress().getPort();
+        int nnInfoPort = request.getServerPort();
         out.print("<div id=\"dfsnodetable\"> ");
         if (whatNodes.equals("LIVE")) {
           out.print(
@@ -888,8 +892,8 @@ class NamenodeJspHelper {
 
             JspHelper.sortNodeList(live, sorterField, sorterOrder);
             for (DatanodeDescriptor aLive : live) {
-              generateNodeData(out, aLive, port_suffix, true, nnHttpPort,
-                  nnaddr);
+              generateNodeData(out, aLive, port_suffix, true, nnInfoPort,
+                  nnaddr, request.getScheme());
             }
           }
           out.print("</table>\n");
@@ -906,8 +910,8 @@ class NamenodeJspHelper {
 
             JspHelper.sortNodeList(dead, sorterField, sorterOrder);
             for (DatanodeDescriptor aDead : dead) {
-              generateNodeData(out, aDead, port_suffix, false, nnHttpPort,
-                  nnaddr);
+              generateNodeData(out, aDead, port_suffix, false, nnInfoPort,
+                  nnaddr, request.getScheme());
             }
 
             out.print("</table>\n");
@@ -938,7 +942,7 @@ class NamenodeJspHelper {
             JspHelper.sortNodeList(decommissioning, "name", "ASC");
             for (DatanodeDescriptor aDecommissioning : decommissioning) {
               generateDecommissioningNodeData(out, aDecommissioning,
-                  port_suffix, true, nnHttpPort, nnaddr);
+                  port_suffix, true, nnInfoPort, nnaddr, request.getScheme());
             }
             out.print("</table>\n");
           }
@@ -957,7 +961,7 @@ class NamenodeJspHelper {
     final BlockManager blockManager;
 
     XMLBlockInfo(FSNamesystem fsn, Long blockId) throws IOException {
-      this.blockManager = fsn.getBlockManager();
+      this.blockManager = fsn != null ? fsn.getBlockManager() : null;
 
       if (blockId == null) {
         this.block = null;
@@ -983,7 +987,7 @@ class NamenodeJspHelper {
 
           @Override
           public Object performTask() throws StorageException, IOException {
-            return blockManager.getBlockCollection(block);
+            return blockManager != null ? ((INode) blockManager.getBlockCollection(block)).asFile() : null;
           }
         }.handle();
       }
@@ -1059,7 +1063,8 @@ class NamenodeJspHelper {
         }
 
         doc.startTag("replicas");
-        for (DatanodeStorageInfo storage : blockManager.storageList(block)){
+        for (DatanodeStorageInfo storage : (blockManager != null ? blockManager.storageList(block):
+                Collections.<DatanodeStorageInfo>emptyList())){
           DatanodeDescriptor dd = storage.getDatanodeDescriptor();
           doc.startTag("replica");
           doc.startTag("host_name");
@@ -1094,7 +1099,7 @@ class NamenodeJspHelper {
     
     XMLCorruptBlockInfo(FSNamesystem fsn, Configuration conf,
         int numCorruptBlocks, Long startingBlockId) {
-      this.blockManager = fsn.getBlockManager();
+      this.blockManager = fsn != null ? fsn.getBlockManager() : null;
       this.conf = conf;
       this.numCorruptBlocks = numCorruptBlocks;
       this.startingBlockId = startingBlockId;
@@ -1117,16 +1122,19 @@ class NamenodeJspHelper {
       doc.endTag();
       
       doc.startTag("num_missing_blocks");
-      doc.pcdata("" + blockManager.getMissingBlocksCount());
+      doc.pcdata("" + (blockManager != null ?
+        blockManager.getMissingBlocksCount() : 0));
       doc.endTag();
       
       doc.startTag("num_corrupt_replica_blocks");
-      doc.pcdata("" + blockManager.getCorruptReplicaBlocksCount());
+      doc.pcdata("" + (blockManager != null ?
+        blockManager.getCorruptReplicaBlocksCount() : 0));
       doc.endTag();
 
       doc.startTag("corrupt_replica_block_ids");
-      final long[] corruptBlockIds = blockManager
-          .getCorruptReplicaBlockIds(numCorruptBlocks, startingBlockId);
+      final long[] corruptBlockIds = blockManager != null ?
+        blockManager.getCorruptReplicaBlockIds(numCorruptBlocks,
+        startingBlockId) : null;
       if (corruptBlockIds != null) {
         for (Long blockId : corruptBlockIds) {
           doc.startTag("block_id");
