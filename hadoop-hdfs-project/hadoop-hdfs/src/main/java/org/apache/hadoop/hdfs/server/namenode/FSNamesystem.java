@@ -192,8 +192,6 @@ import java.util.concurrent.TimeUnit;
 import static io.hops.transaction.lock.LockFactory.BLK;
 import static io.hops.transaction.lock.LockFactory.getInstance;
 import io.hops.transaction.lock.TransactionLockTypes;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 import org.apache.hadoop.fs.DirectoryListingStartAfterNotFoundException;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BLOCK_SIZE_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BLOCK_SIZE_KEY;
