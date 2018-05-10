@@ -370,6 +370,10 @@ public class FSNamesystem
   */
   
   private void logProvenanceEvent(String cmd, String src, String dst) {
+    if(!conf.getBoolean(DFSConfigKeys.DFS_HDFS_PROVENANCE_ENABLED,
+            DFSConfigKeys.DFS_HDFS_PROVENANCE_ENABLED_DEFAULT)) {
+      return;
+    }
     if(!isExternalInvocation()) {
       return;
     }
