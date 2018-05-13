@@ -378,29 +378,38 @@ public class FSNamesystem
       return;
     }
     ProvenanceLogEntry.Operation op = provenanceCmd(cmd);
+    if(ProvenanceLogEntry.Operation.OTHER.equals(op)) {
+      return;
+    }
     
     UserGroupInformation ugi;
-    INode inode;
-    INodeDirectory datasetDir;
-    
     int userId;
     try {
       ugi = getRemoteUser();
-      inode = INodeFile.valueOf(dir.getINode(src), src);
       userId = UsersGroups.getUserID(ugi.getUserName());
+    } catch (IOException ex) {
+      LOG.error("provenance log error");
+      return;
+    }
+    String projectUser = ugi.getUserName();
+    String userName = projectUser;
+    String appId = "";
+    
+    INode inode;
+    INodeDirectory datasetDir;
+    
+    try {
+      inode = INodeFile.valueOf(dir.getINode(src), src);
       datasetDir = inode.getMetaEnabledParent();
     } catch (IOException ex) {
       LOG.error("provenance log error");
       return;
     }
-    
-    String appId = "";
     int logicalTime = inode.getLogicalTime();
-    String projectUser = ugi.getUserName();
-    String projectName = "project";
-    String userName = projectUser;
-    String inodeName = inode.getLocalName();
     int parentId = inode.getParentId();
+    String inodeName = inode.getLocalName();
+    String projectName = datasetDir.parent.getLocalName();
+    String datasetName = datasetDir.getLocalName();
 //    if(projectUser.contains("__")) {
 //      String[] userParts = projectUser.split(dst);
 //      projectName = userParts[0];
@@ -409,7 +418,6 @@ public class FSNamesystem
 //      LOG.error("provenance log error");
 //      return;
 //    }
-    String datasetName = datasetDir.getLocalName();
     
     ProvenanceLogEntry ple = new ProvenanceLogEntry(inode.id, userId, appId,
       logicalTime, parentId, projectName, datasetName, inodeName, userName, op);
@@ -440,11 +448,6 @@ public class FSNamesystem
       case "getfileinfo" :
       case "listStatus" : 
       case "getEncodingStatus":
-      case "encodeFile":
-      case "revokeEncoding":
-      case "addBlockChecksum":
-      case "getBlockChecksum":
-      case "checkAccess":
         op = ProvenanceLogEntry.Operation.METADATA; break;
       case "mkdirs" : break;
       case "createSymlink" : break;
@@ -1164,6 +1167,7 @@ public class FSNamesystem
     dir.setPermission(src, permission);
     resultingStat = getAuditFileInfo(src, false);
     logAuditEvent(true, "setPermission", src, null, resultingStat);
+    logProvenanceEvent("setPermission", src, null);
   }
 
   /**
@@ -1229,6 +1233,7 @@ public class FSNamesystem
     dir.setOwner(src, username, group);
     resultingStat = getAuditFileInfo(src, false);
     logAuditEvent(true, "setOwner", src, null, resultingStat);
+    logProvenanceEvent("setOwner", src, null);
     if(isSTO){
       INodesInPath inodesInPath = dir.getRootDir().getExistingPathINodes(src, false);
       INode[] nodes = inodesInPath.getINodes();
@@ -1291,6 +1296,7 @@ public class FSNamesystem
     dir.setOwner(src, username, group);
     resultingStat = getAuditFileInfo(src, false);
     logAuditEvent(true, "setOwner", src, null, resultingStat);
+    logProvenanceEvent("setOwner", src, null);
   }
 
   /**
@@ -1336,7 +1342,6 @@ public class FSNamesystem
             LocatedBlocks blocks =
                 getBlockLocationsInternal(src, offset, length, true, true,
                     true);
-            logProvenanceEvent("open", src, src);
             if (blocks != null && !blocks
                 .hasPhantomBlock()) { // no need to sort phantom datanodes
               blockManager.getDatanodeManager()
@@ -1450,6 +1455,7 @@ public class FSNamesystem
         }
       }
     }
+    logProvenanceEvent("open", src, null);
     return ret;
   }
 
@@ -1596,6 +1602,7 @@ public class FSNamesystem
     concatInternal(pc, target, srcs);
     resultingStat = getAuditFileInfo(target, false);
     logAuditEvent(true, "concat", Arrays.toString(srcs), target, resultingStat);
+    logProvenanceEvent("concat", null, null);
   }
 
   /**
@@ -1769,6 +1776,7 @@ public class FSNamesystem
           "File/Directory " + src + " does not exist.");
     }
     logAuditEvent(true, "setTimes", src, null, resultingStat);
+    logProvenanceEvent("setTimes", src, null);
   }
 
   /**
@@ -1822,6 +1830,7 @@ public class FSNamesystem
     createSymlinkInternal(pc, target, link, dirPerms, createParent);
     resultingStat = getAuditFileInfo(link, false);
     logAuditEvent(true, "createSymlink", link, target, resultingStat);
+    logProvenanceEvent("createSymlink", link, target);
   }
 
   /**
@@ -1924,6 +1933,7 @@ public class FSNamesystem
 
     if (isFile) {
       logAuditEvent(true, "setReplication", src);
+      logProvenanceEvent("setReplication", src, null);
     }
     return isFile;
   }
@@ -1977,6 +1987,7 @@ public class FSNamesystem
       INodeDirectory dirNode = (INodeDirectory) targetNode;
       dirNode.setMetaEnabled(metaEnabled);
       EntityManager.update(dirNode);
+      logProvenanceEvent("setMetaEnabled", src, null);
     }
   }
 
@@ -2043,7 +2054,7 @@ public class FSNamesystem
             }
 
             dir.setStoragePolicy(filename, policy);
-
+            logProvenanceEvent("setStoragePolicy", filename, null);
             return null;
           }
         };
@@ -2210,6 +2221,7 @@ public class FSNamesystem
     final HdfsFileStatus stat = dir.getFileInfo(src, false, true);
     logAuditEvent(true, "create", src, null,
         (isAuditEnabled() && isExternalInvocation()) ? stat : null);
+    logProvenanceEvent("create", src, null);
     return stat;
   }
 
@@ -2689,6 +2701,7 @@ public class FSNamesystem
       }
     }
     logAuditEvent(true, "append", src);
+    logProvenanceEvent("append", src, null);
     return lb;
   }
 
@@ -3416,6 +3429,7 @@ public class FSNamesystem
     boolean status = deleteInternal(src, recursive, true);
     if (status) {
       logAuditEvent(true, "delete", src);
+      logProvenanceEvent("delete", src, null);
     }
     return status;
   }
@@ -3548,6 +3562,7 @@ public class FSNamesystem
               throw e;
             }
             logAuditEvent(true, "getfileinfo", src);
+            logProvenanceEvent("getfileinfo", src, null);
             return stat;
           }
         };
@@ -3642,6 +3657,7 @@ public class FSNamesystem
 
     if (status) {
       logAuditEvent(true, "mkdirs", src, null, resultingStat);
+      logProvenanceEvent("mkdirs", src, null);
     }
     return status;
   }
@@ -4217,6 +4233,7 @@ public class FSNamesystem
       isSuperUser = pc.isSuperUser();
     }
     logAuditEvent(true, "listStatus", src);
+    logProvenanceEvent("listStatus", src, null);
     dl = dir.getListing(src, startAfter, needLocation, isSuperUser);
     return dl;
   }
@@ -7513,6 +7530,9 @@ public class FSNamesystem
     try {
       ret = multiTransactionalDeleteInternal(path, recursive);
       logAuditEvent(ret, "delete", path);
+      if(ret) {
+        logProvenanceEvent("delete", path, null);
+      }
     } catch (IOException e) {
       logAuditEvent(false, "delete", path);
       throw e;
