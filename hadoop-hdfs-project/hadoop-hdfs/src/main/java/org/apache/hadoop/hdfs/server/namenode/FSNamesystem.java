@@ -1309,7 +1309,7 @@ public class FSNamesystem
             LocatedBlocks blocks =
                 getBlockLocationsInternal(src, offset, length, true, true,
                     true);
-            logProvenanceEvent("open", src, src);
+//            logProvenanceEvent("open", src, src);
             if (blocks != null && !blocks
                 .hasPhantomBlock()) { // no need to sort phantom datanodes
               blockManager.getDatanodeManager()
