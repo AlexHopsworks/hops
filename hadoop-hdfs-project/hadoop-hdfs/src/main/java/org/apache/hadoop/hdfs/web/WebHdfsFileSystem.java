@@ -50,15 +50,11 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.MD5MD5CRC32FileChecksum;
 import org.apache.hadoop.fs.Options;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.fs.permission.FsPermission;
-import org.apache.hadoop.hdfs.ByteRangeInputStream;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtil;
-import org.apache.hadoop.hdfs.protocol.AclException;
-import org.apache.hadoop.hdfs.protocol.DSQuotaExceededException;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSelector;
@@ -98,9 +94,7 @@ import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.security.authentication.client.AuthenticatedURL;
 import org.apache.hadoop.security.authentication.client.AuthenticationException;
-import org.apache.hadoop.security.authentication.client.ConnectionConfigurator;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.security.token.TokenRenewer;
@@ -125,18 +119,9 @@ public class WebHdfsFileSystem extends FileSystem
   /** Http URI: http://namenode:port/{PATH_PREFIX}/path/to/file */
   public static final String PATH_PREFIX = "/" + SCHEME + "/v" + VERSION;
 
-  /** SPNEGO authenticator */
-  private static final KerberosUgiAuthenticator AUTH = new KerberosUgiAuthenticator();
-  /** Configures connections for AuthenticatedURL */
-  private static final ConnectionConfigurator CONN_CONFIGURATOR =
-    new ConnectionConfigurator() {
-      @Override
-      public HttpURLConnection configure(HttpURLConnection conn)
-          throws IOException {
-        URLUtils.setTimeouts(conn);
-        return conn;
-      }
-    };
+  /** Default connection factory may be overriden in tests to use smaller timeout values */
+  URLConnectionFactory connectionFactory = URLConnectionFactory.DEFAULT_CONNECTION_FACTORY;
+  
   /** Delegation token kind */
   public static final Text TOKEN_KIND = new Text("WEBHDFS delegation");
   /** Token selector */
@@ -481,17 +466,7 @@ public class WebHdfsFileSystem extends FileSystem
         throws IOException {
       final HttpURLConnection conn;
       try {
-        if (op.getRequireAuth()) {
-          LOG.debug("open AuthenticatedURL connection");
-          UserGroupInformation.getCurrentUser().checkTGTAndReloginFromKeytab();
-          final AuthenticatedURL.Token authToken = new AuthenticatedURL.Token();
-          conn = new AuthenticatedURL(AUTH, CONN_CONFIGURATOR).openConnection(
-            url, authToken);
-          URLUtils.setTimeouts(conn);
-        } else {
-          LOG.debug("open URL connection");
-          conn = (HttpURLConnection)URLUtils.openConnection(url);
-        }
+        conn = (HttpURLConnection) connectionFactory.openConnection(op, url);
       } catch (AuthenticationException e) {
         throw new IOException(e);
       }
@@ -585,8 +560,10 @@ public class WebHdfsFileSystem extends FileSystem
       checkRetry = false;
       
       //Step 2) Submit another Http request with the URL from the Location header with data.
-      conn = (HttpURLConnection)URLUtils.openConnection(new URL(redirect));
-      conn.setRequestProperty("Content-Type", MediaType.APPLICATION_OCTET_STREAM);
+      conn = (HttpURLConnection) connectionFactory.openConnection(new URL(
+          redirect));
+      conn.setRequestProperty("Content-Type",
+          MediaType.APPLICATION_OCTET_STREAM);
       conn.setChunkedStreamingMode(32 << 10); //32kB-chunk
       connect();
       return conn;
@@ -608,7 +585,8 @@ public class WebHdfsFileSystem extends FileSystem
           disconnect();
   
           checkRetry = false;
-          conn = (HttpURLConnection)URLUtils.openConnection(new URL(redirect));
+          conn = (HttpURLConnection) connectionFactory.openConnection(new URL(
+              redirect));
           connect();
         }
 
@@ -847,12 +825,6 @@ public class WebHdfsFileSystem extends FileSystem
     return new Runner(op, f, new BufferSizeParam(bufferSize))
       .run()
       .write(bufferSize);
-  }
-
-  @SuppressWarnings("deprecation")
-  @Override
-  public boolean delete(final Path f) throws IOException {
-    return delete(f, true);
   }
 
   @Override
