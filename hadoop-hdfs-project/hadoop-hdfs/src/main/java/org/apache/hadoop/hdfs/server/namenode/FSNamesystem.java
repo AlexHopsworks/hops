@@ -377,11 +377,7 @@ public class FSNamesystem
     if(!isExternalInvocation()) {
       return;
     }
-    ProvenanceLogEntry.Operation op;
-    switch(cmd) {
-      case "open" : op = ProvenanceLogEntry.Operation.READ; break;
-      default: return;
-    }
+    ProvenanceLogEntry.Operation op = provenanceCmd(cmd);
     
     UserGroupInformation ugi;
     INode inode;
@@ -401,18 +397,18 @@ public class FSNamesystem
     String appId = "";
     int logicalTime = inode.getLogicalTime();
     String projectUser = ugi.getUserName();
-    String projectName;
-    String userName;
+    String projectName = "project";
+    String userName = projectUser;
     String inodeName = inode.getLocalName();
     int parentId = inode.getParentId();
-    if(projectUser.contains("__")) {
-      String[] userParts = projectUser.split(dst);
-      projectName = userParts[0];
-      userName = userParts[1];
-    } else {
-      LOG.error("provenance log error");
-      return;
-    }
+//    if(projectUser.contains("__")) {
+//      String[] userParts = projectUser.split(dst);
+//      projectName = userParts[0];
+//      userName = userParts[1];
+//    } else {
+//      LOG.error("provenance log error");
+//      return;
+//    }
     String datasetName = datasetDir.getLocalName();
     
     ProvenanceLogEntry ple = new ProvenanceLogEntry(inode.id, userId, appId,
@@ -426,6 +422,36 @@ public class FSNamesystem
       LOG.error("provenance log error");
       return;
     }
+  }
+  
+  private ProvenanceLogEntry.Operation provenanceCmd(String cmd) {
+    ProvenanceLogEntry.Operation op = null;
+    switch(cmd) {
+      case "create" : op = ProvenanceLogEntry.Operation.CREATE; break;
+      case "open" : op = ProvenanceLogEntry.Operation.READ; break;
+      case "append" : op = ProvenanceLogEntry.Operation.APPEND; break;
+      case "delete" : op = ProvenanceLogEntry.Operation.DELETE; break;
+      case "setPermission" : 
+      case "setOwner" : 
+      case "setTimes" : 
+      case "setReplication" : 
+      case "setMetaEnabled" : 
+      case "setStoragePolicy" : 
+      case "getfileinfo" :
+      case "listStatus" : 
+      case "getEncodingStatus":
+      case "encodeFile":
+      case "revokeEncoding":
+      case "addBlockChecksum":
+      case "getBlockChecksum":
+      case "checkAccess":
+        op = ProvenanceLogEntry.Operation.METADATA; break;
+      case "mkdirs" : break;
+      case "createSymlink" : break;
+      case "concat" : break;
+      default: break;
+    }
+    return op;
   }
   /**
    * 
@@ -1082,6 +1108,7 @@ public class FSNamesystem
     dir.setPermission(src, permission);
     resultingStat = getAuditFileInfo(src, false);
     logAuditEvent(true, "setPermission", src, null, resultingStat);
+    logProvenanceEvent("setPermission", src, null);
 
     //remove sto from
     if(isSTO){
@@ -1309,7 +1336,7 @@ public class FSNamesystem
             LocatedBlocks blocks =
                 getBlockLocationsInternal(src, offset, length, true, true,
                     true);
-//            logProvenanceEvent("open", src, src);
+            logProvenanceEvent("open", src, src);
             if (blocks != null && !blocks
                 .hasPhantomBlock()) { // no need to sort phantom datanodes
               blockManager.getDatanodeManager()
