@@ -378,7 +378,8 @@ public class FSNamesystem
       return;
     }
     ProvenanceLogEntry.Operation op = provenanceCmd(cmd);
-    if(ProvenanceLogEntry.Operation.OTHER.equals(op)) {
+    if(ProvenanceLogEntry.Operation.OTHER.equals(op)
+      || ProvenanceLogEntry.Operation.METADATA.equals(op)) {
       return;
     }
     
