@@ -402,7 +402,7 @@ public class FSNamesystem
       inode = INodeFile.valueOf(dir.getINode(src), src);
       datasetDir = inode.getMetaEnabledParent();
     } catch (IOException ex) {
-      LOG.error("provenance log error");
+      LOG.error("provenance log error1");
       return;
     }
     int logicalTime = inode.getLogicalTime();
@@ -424,10 +424,10 @@ public class FSNamesystem
     try {
       EntityManager.add(ple);
     } catch (StorageException ex) {
-      LOG.error("provenance log error");
+      LOG.error("provenance log error2");
       return;
     } catch (TransactionContextException ex) {
-      LOG.error("provenance log error");
+      LOG.error("provenance log error3");
       return;
     }
   }
