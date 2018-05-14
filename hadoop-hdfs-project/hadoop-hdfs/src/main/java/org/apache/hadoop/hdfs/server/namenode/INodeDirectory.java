@@ -23,6 +23,7 @@ import io.hops.exception.StorageException;
 import io.hops.exception.TransactionContextException;
 import io.hops.metadata.hdfs.entity.INodeIdentifier;
 import io.hops.metadata.hdfs.entity.MetadataLogEntry;
+import io.hops.metadata.hdfs.entity.ProvenanceLogEntry;
 import io.hops.transaction.EntityManager;
 import org.apache.hadoop.fs.UnresolvedLinkException;
 import org.apache.hadoop.fs.permission.PermissionStatus;
@@ -383,6 +384,7 @@ public class INodeDirectory extends INode {
     }
 
     node.logMetadataEvent(MetadataLogEntry.Operation.ADD);
+    node.logProvenanceEvent(ProvenanceLogEntry.Operation.APPEND);
 
     return true;
   }

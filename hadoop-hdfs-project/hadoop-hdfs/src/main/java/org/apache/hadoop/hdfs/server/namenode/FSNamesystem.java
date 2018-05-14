@@ -192,6 +192,8 @@ import java.util.concurrent.TimeUnit;
 import static io.hops.transaction.lock.LockFactory.BLK;
 import static io.hops.transaction.lock.LockFactory.getInstance;
 import io.hops.transaction.lock.TransactionLockTypes;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import org.apache.hadoop.fs.DirectoryListingStartAfterNotFoundException;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BLOCK_SIZE_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BLOCK_SIZE_KEY;
@@ -366,100 +368,31 @@ public class FSNamesystem
   public static final Log auditLog = LogFactory.getLog(FSNamesystem.class.
     getName() + ".audit");
 
-  /**
-   * Provenance
-   */
   private void logProvenanceEvent(String cmd, String src, String dst) {
-
-    if (!provenanceEnabled() || !isExternalInvocation()) {
+    if(!provenanceEnabled() && !isExternalInvocation()) {
       return;
     }
-
+    
     ProvenanceLogEntry.Operation op = provenanceCmd(cmd);
     if (ProvenanceLogEntry.Operation.OTHER.equals(op)
       || ProvenanceLogEntry.Operation.METADATA.equals(op)) {
       return;
     }
-
-    UserGroupInformation ugi;
-    int userId;
+    
     try {
-      ugi = getRemoteUser();
-      userId = UsersGroups.getUserID(ugi.getUserName());
+      INode inode = getINode(src);
+      inode.logProvenanceEvent(op);
     } catch (IOException ex) {
       LOG.error("provenance log error1", ex);
       return;
     }
-    String projectUser = ugi.getUserName();
-    String userName = projectUser;
-    String appId = ugi.getApplicationId();
-
-    INode inode;
-    INodeDirectory datasetINode;
-    INodeDirectory projectINode;
-
-    try {
-      inode = getINode(src);
-      if(inode == null) {
-        LOG.error("provenance log error - not a file - src:" + src + " cmd:" + cmd);
-        return;
-      } 
-      datasetINode = inode.getMetaEnabledParent();
-      if(datasetINode == null) {
-        LOG.error("provenance log error - not a dataset - src:" + src + " cmd:" + cmd);
-        return;
-      }
-      if (!detailedProvenanceEnabled()) {
-//        inode = datasetINode;
-      }
-      projectINode = datasetINode.getParent();
-    } catch (IOException ex) {
-      LOG.error("provenance log error2", ex);
-      return;
-    }
-    int logicalTime = inode.getLogicalTime();
-    long timestamp = inode.getAccessTime();
-    int parentId = inode.getParentId();
-    int partitionId = inode.getPartitionId();
-    String inodeName = inode.getLocalName();
-    String projectName = projectINode.getLocalName();
-    String datasetName = datasetINode.getLocalName();
-
-    ProvenanceLogEntry ple = new ProvenanceLogEntry(inode.id, userId, appId,
-      logicalTime, logicalTime, timestamp, timestamp, parentId, partitionId, 
-      projectName, datasetName, inodeName, userName, op);
-    try {
-      EntityManager.add(ple);
-    } catch (IOException ex) {
-      LOG.error("provenance log error3", ex);
-      return;
-    }
   }
-
-  private boolean provenanceEnabled() {
-    return conf.getBoolean(DFSConfigKeys.DFS_HDFS_PROVENANCE_ENABLED,
-      DFSConfigKeys.DFS_HDFS_PROVENANCE_ENABLED_DEFAULT);
-  }
-
-  private boolean detailedProvenanceEnabled() {
-    return conf.getBoolean(DFSConfigKeys.DFS_HDFS_PROVENANCE_DETAIL_ENABLED,
-      DFSConfigKeys.DFS_HDFS_PROVENANCE_DETAIL_ENABLED_DEFAULT);
-  }
-
+  
   private ProvenanceLogEntry.Operation provenanceCmd(String cmd) {
     ProvenanceLogEntry.Operation op = null;
     switch (cmd) {
-      case "create":
-        op = ProvenanceLogEntry.Operation.CREATE;
-        break;
       case "open":
         op = ProvenanceLogEntry.Operation.READ;
-        break;
-      case "append":
-        op = ProvenanceLogEntry.Operation.APPEND;
-        break;
-      case "delete":
-        op = ProvenanceLogEntry.Operation.DELETE;
         break;
       case "setPermission":
       case "setOwner":
@@ -481,10 +414,17 @@ public class FSNamesystem
     }
     return op;
   }
-  /**
-   *
-   */
+  
+  private boolean provenanceEnabled() {
+    return conf.getBoolean(DFSConfigKeys.DFS_HDFS_PROVENANCE_ENABLED,
+      DFSConfigKeys.DFS_HDFS_PROVENANCE_ENABLED_DEFAULT);
+  }
 
+  private boolean detailedProvenanceEnabled() {
+    return conf.getBoolean(DFSConfigKeys.DFS_HDFS_PROVENANCE_DETAIL_ENABLED,
+      DFSConfigKeys.DFS_HDFS_PROVENANCE_DETAIL_ENABLED_DEFAULT);
+  }
+  
   static final int DEFAULT_MAX_CORRUPT_FILEBLOCKS_RETURNED = 100;
   static int BLOCK_DELETION_INCREMENT = 1000;
 
@@ -2294,7 +2234,6 @@ public class FSNamesystem
     final HdfsFileStatus stat = dir.getFileInfo(src, false, true);
     logAuditEvent(true, "create", src, null,
       (isAuditEnabled() && isExternalInvocation()) ? stat : null);
-    logProvenanceEvent("create", src, null);
     return stat;
   }
 
@@ -2793,7 +2732,6 @@ public class FSNamesystem
       }
     }
     logAuditEvent(true, "append", src);
-    logProvenanceEvent("append", src, null);
     return lb;
   }
 
@@ -3539,7 +3477,6 @@ public class FSNamesystem
     boolean status = deleteInternal(src, recursive, true);
     if (status) {
       logAuditEvent(true, "delete", src);
-      logProvenanceEvent("delete", src, null);
     }
     return status;
   }
