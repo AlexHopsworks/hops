@@ -401,12 +401,16 @@ public class FSNamesystem
     try {
       inode = getINode(src);
       if(inode == null) {
-        LOG.error("provenance log error - src:" + src + " cmd:" + cmd);
+        LOG.error("provenance log error - not a file - src:" + src + " cmd:" + cmd);
         return;
       } 
       datasetINode = inode.getMetaEnabledParent();
+      if(datasetINode == null) {
+        LOG.error("provenance log error - not a dataset - src:" + src + " cmd:" + cmd);
+        return;
+      }
       if (!detailedProvenanceEnabled()) {
-        inode = datasetINode;
+//        inode = datasetINode;
       }
       projectINode = datasetINode.getParent();
     } catch (IOException ex) {
