@@ -388,27 +388,29 @@ public class FSNamesystem
       ugi = getRemoteUser();
       userId = UsersGroups.getUserID(ugi.getUserName());
     } catch (IOException ex) {
-      LOG.error("provenance log error");
+      LOG.error("provenance log error1", ex);
       return;
     }
     String projectUser = ugi.getUserName();
     String userName = projectUser;
-    String appId = "";
+    String appId = ugi.getApplicationId();
     
     INode inode;
     INodeDirectory datasetDir;
+    INodeDirectory projectDir;
     
     try {
-      inode = INodeFile.valueOf(dir.getINode(src), src);
+      inode = getINode(src);
       datasetDir = inode.getMetaEnabledParent();
+      projectDir = datasetDir.getParent();
     } catch (IOException ex) {
-      LOG.error("provenance log error1");
+      LOG.error("provenance log error2", ex);
       return;
     }
     int logicalTime = inode.getLogicalTime();
     int parentId = inode.getParentId();
     String inodeName = inode.getLocalName();
-    String projectName = datasetDir.parent.getLocalName();
+    String projectName = projectDir.getLocalName();
     String datasetName = datasetDir.getLocalName();
 //    if(projectUser.contains("__")) {
 //      String[] userParts = projectUser.split(dst);
@@ -423,11 +425,8 @@ public class FSNamesystem
       logicalTime, parentId, projectName, datasetName, inodeName, userName, op);
     try {
       EntityManager.add(ple);
-    } catch (StorageException ex) {
-      LOG.error("provenance log error2");
-      return;
-    } catch (TransactionContextException ex) {
-      LOG.error("provenance log error3");
+    } catch (IOException ex) {
+      LOG.error("provenance log error3", ex);
       return;
     }
   }
