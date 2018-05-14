@@ -414,13 +414,16 @@ public class FSNamesystem
       return;
     }
     int logicalTime = inode.getLogicalTime();
+    long timestamp = inode.getAccessTime();
     int parentId = inode.getParentId();
+    int partitionId = inode.getPartitionId();
     String inodeName = inode.getLocalName();
     String projectName = projectINode.getLocalName();
     String datasetName = datasetINode.getLocalName();
 
     ProvenanceLogEntry ple = new ProvenanceLogEntry(inode.id, userId, appId,
-      logicalTime, parentId, projectName, datasetName, inodeName, userName, op);
+      logicalTime, logicalTime, timestamp, timestamp, parentId, partitionId, 
+      projectName, datasetName, inodeName, userName, op);
     try {
       EntityManager.add(ple);
     } catch (IOException ex) {
