@@ -448,10 +448,10 @@ public class FSNamesystem
       case "listStatus" : 
       case "getEncodingStatus":
         op = ProvenanceLogEntry.Operation.METADATA; break;
-      case "mkdirs" : break;
-      case "createSymlink" : break;
-      case "concat" : break;
-      default: break;
+      case "mkdirs" :
+      case "createSymlink" : 
+      case "concat" : ;
+      default: op = ProvenanceLogEntry.Operation.OTHER; break;
     }
     return op;
   }
