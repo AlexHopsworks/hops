@@ -401,6 +401,10 @@ public class FSNamesystem
     
     try {
       inode = getINode(src);
+      if(inode == null) {
+        LOG.error("provenance log error - src:" + src + " cmd:" + cmd);
+        return;
+      }
       datasetDir = inode.getMetaEnabledParent();
       projectDir = datasetDir.getParent();
     } catch (IOException ex) {
