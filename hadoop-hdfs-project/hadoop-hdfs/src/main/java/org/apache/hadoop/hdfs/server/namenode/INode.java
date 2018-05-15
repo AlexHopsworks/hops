@@ -1220,6 +1220,9 @@ public abstract class INode implements Comparable<byte[]>, LinkedElement {
     String projectUser = ugi.getUserName();
     String operationUser = projectUser;
     String appId = ugi.getApplicationId();
+    if(appId == null) {
+       appId = "notls";
+    }
 
     INode inode;
     INodeDirectory datasetINode;
