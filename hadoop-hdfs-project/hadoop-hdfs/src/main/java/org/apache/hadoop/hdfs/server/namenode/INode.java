@@ -1227,12 +1227,8 @@ public abstract class INode implements Comparable<byte[]>, LinkedElement {
     try {
       datasetINode = getMetaEnabledParent();
       if (datasetINode == null) {
-        if (ProvenanceLogEntry.Operation.DELETE.equals(op)) {
-          //TODO Alex - get a hold of the parent inode maybe?
-          return;
-        }
-        LOG.error("provenance log error - not a dataset - src:" 
-          +  getFullPathName()+ " op:" + op);
+//        LOG.info("provenance log error - not a dataset - src:" 
+//          +  getFullPathName()+ " op:" + op);
         return;
       }
       projectINode = datasetINode.getParent();
