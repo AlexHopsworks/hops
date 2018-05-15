@@ -324,7 +324,7 @@ public class FSDirectory implements Closeable {
               " blocks is persisted to the file system");
     }
     file.logMetadataEvent(MetadataLogEntry.Operation.ADD);
-    file.logProvenanceEvent(ProvenanceLogEntry.Operation.APPEND);
+    file.logProvenanceEvent(ProvenanceLogEntry.Operation.append());
   }
 
   /**
@@ -1062,12 +1062,12 @@ boolean unprotectedRenameTo(String src, String dst, long timestamp,
          addMetaDataLogForDirDeletion(child);
        }else{
          child.logMetadataEvent(MetadataLogEntry.Operation.DELETE);
-         child.logProvenanceEvent(ProvenanceLogEntry.Operation.DELETE);
+         child.logProvenanceEvent(ProvenanceLogEntry.Operation.delete());
        }
       }
     }
     targetNode.logMetadataEvent(MetadataLogEntry.Operation.DELETE);
-    targetNode.logProvenanceEvent(ProvenanceLogEntry.Operation.DELETE);
+    targetNode.logProvenanceEvent(ProvenanceLogEntry.Operation.delete());
   }
 
   private byte getStoragePolicyID(byte inodePolicy, byte parentPolicy) {
@@ -1756,7 +1756,7 @@ boolean unprotectedRenameTo(String src, String dst, long timestamp,
     if (forRename) {
       removedNode = inodes[pos];
       removedNode.logMetadataEvent(MetadataLogEntry.Operation.DELETE);
-      removedNode.logProvenanceEvent(ProvenanceLogEntry.Operation.DELETE);
+      removedNode.logProvenanceEvent(ProvenanceLogEntry.Operation.delete());
     } else {
       removedNode = ((INodeDirectory) inodes[pos - 1])
           .removeChild(inodes[pos]);

@@ -384,7 +384,7 @@ public class INodeDirectory extends INode {
     }
 
     node.logMetadataEvent(MetadataLogEntry.Operation.ADD);
-    node.logProvenanceEvent(ProvenanceLogEntry.Operation.APPEND);
+    node.logProvenanceEvent(ProvenanceLogEntry.Operation.append());
 
     return true;
   }

@@ -368,12 +368,12 @@ public class FSNamesystem
   public static final Log auditLog = LogFactory.getLog(FSNamesystem.class.
     getName() + ".audit");
 
-  private void logProvenanceEvent(String cmd, String src, String dst) {
+  private void logProvenanceEvent(ProvenanceLogEntry.Operation op, 
+    String src, String dst) {
     if(!provenanceEnabled() && !isExternalInvocation()) {
       return;
     }
     
-    ProvenanceLogEntry.Operation op = provenanceCmd(cmd);
     if (ProvenanceLogEntry.Operation.OTHER.equals(op)
       || ProvenanceLogEntry.Operation.METADATA.equals(op)) {
       return;
@@ -407,7 +407,7 @@ public class FSNamesystem
         break;
       case "mkdirs":
       case "createSymlink":
-      case "concat": ;
+      case "concat": op = ProvenanceLogEntry.Operation.OTHER; break;
       default:
         op = ProvenanceLogEntry.Operation.OTHER;
         break;
@@ -1094,7 +1094,7 @@ public class FSNamesystem
     dir.setPermission(src, permission);
     resultingStat = getAuditFileInfo(src, false);
     logAuditEvent(true, "setPermission", src, null, resultingStat);
-    logProvenanceEvent("setPermission", src, null);
+    logProvenanceEvent(ProvenanceLogEntry.Operation.setPermission(), src, null);
 
     //remove sto from
     if (isSTO) {
@@ -1151,7 +1151,7 @@ public class FSNamesystem
     dir.setPermission(src, permission);
     resultingStat = getAuditFileInfo(src, false);
     logAuditEvent(true, "setPermission", src, null, resultingStat);
-    logProvenanceEvent("setPermission", src, null);
+    logProvenanceEvent(ProvenanceLogEntry.Operation.setPermission(), src, null);
   }
 
   /**
@@ -1222,7 +1222,7 @@ public class FSNamesystem
     dir.setOwner(src, username, group);
     resultingStat = getAuditFileInfo(src, false);
     logAuditEvent(true, "setOwner", src, null, resultingStat);
-    logProvenanceEvent("setOwner", src, null);
+    logProvenanceEvent(ProvenanceLogEntry.Operation.setOwner(), src, null);
     if (isSTO) {
       INodesInPath inodesInPath = dir.getRootDir().getExistingPathINodes(src,
         false);
@@ -1286,7 +1286,7 @@ public class FSNamesystem
     dir.setOwner(src, username, group);
     resultingStat = getAuditFileInfo(src, false);
     logAuditEvent(true, "setOwner", src, null, resultingStat);
-    logProvenanceEvent("setOwner", src, null);
+    logProvenanceEvent(ProvenanceLogEntry.Operation.setOwner(), src, null);
   }
 
   /**
@@ -1453,7 +1453,7 @@ public class FSNamesystem
         }
       }
     }
-    logProvenanceEvent("open", src, null);
+    logProvenanceEvent(ProvenanceLogEntry.Operation.getBlockLocations(), src, null);
     return ret;
   }
 
@@ -1602,7 +1602,7 @@ public class FSNamesystem
     concatInternal(pc, target, srcs);
     resultingStat = getAuditFileInfo(target, false);
     logAuditEvent(true, "concat", Arrays.toString(srcs), target, resultingStat);
-    logProvenanceEvent("concat", null, null);
+    logProvenanceEvent(ProvenanceLogEntry.Operation.concat(), null, null);
   }
 
   /**
@@ -1774,7 +1774,7 @@ public class FSNamesystem
         "File/Directory " + src + " does not exist.");
     }
     logAuditEvent(true, "setTimes", src, null, resultingStat);
-    logProvenanceEvent("setTimes", src, null);
+    logProvenanceEvent(ProvenanceLogEntry.Operation.setTimes(), src, null);
   }
 
   /**
@@ -1831,7 +1831,7 @@ public class FSNamesystem
     createSymlinkInternal(pc, target, link, dirPerms, createParent);
     resultingStat = getAuditFileInfo(link, false);
     logAuditEvent(true, "createSymlink", link, target, resultingStat);
-    logProvenanceEvent("createSymlink", link, target);
+    logProvenanceEvent(ProvenanceLogEntry.Operation.createSymlink(), link, target);
   }
 
   /**
@@ -1936,7 +1936,7 @@ public class FSNamesystem
 
     if (isFile) {
       logAuditEvent(true, "setReplication", src);
-      logProvenanceEvent("setReplication", src, null);
+      logProvenanceEvent(ProvenanceLogEntry.Operation.setReplication(), src, null);
     }
     return isFile;
   }
@@ -1991,7 +1991,7 @@ public class FSNamesystem
       INodeDirectory dirNode = (INodeDirectory) targetNode;
       dirNode.setMetaEnabled(metaEnabled);
       EntityManager.update(dirNode);
-      logProvenanceEvent("setMetaEnabled", src, null);
+      logProvenanceEvent(ProvenanceLogEntry.Operation.setMetaEnabled(), src, null);
     }
   }
 
@@ -2061,7 +2061,7 @@ public class FSNamesystem
         }
 
         dir.setStoragePolicy(filename, policy);
-        logProvenanceEvent("setStoragePolicy", filename, null);
+        logProvenanceEvent(ProvenanceLogEntry.Operation.setStoragePolicy(), filename, null);
         return null;
       }
     };
@@ -3614,7 +3614,7 @@ public class FSNamesystem
           throw e;
         }
         logAuditEvent(true, "getfileinfo", src);
-        logProvenanceEvent("getfileinfo", src, null);
+        logProvenanceEvent(ProvenanceLogEntry.Operation.getfileinfo(), src, null);
         return stat;
       }
     };
@@ -3712,7 +3712,7 @@ public class FSNamesystem
 
     if (status) {
       logAuditEvent(true, "mkdirs", src, null, resultingStat);
-      logProvenanceEvent("mkdirs", src, null);
+      logProvenanceEvent(ProvenanceLogEntry.Operation.mkdirs(), src, null);
     }
     return status;
   }
@@ -4294,7 +4294,7 @@ public class FSNamesystem
       isSuperUser = pc.isSuperUser();
     }
     logAuditEvent(true, "listStatus", src);
-    logProvenanceEvent("listStatus", src, null);
+    logProvenanceEvent(ProvenanceLogEntry.Operation.listStatus(), src, null);
     dl = dir.getListing(src, startAfter, needLocation, isSuperUser);
     return dl;
   }
@@ -7644,9 +7644,6 @@ public class FSNamesystem
     try {
       ret = multiTransactionalDeleteInternal(path, recursive);
       logAuditEvent(ret, "delete", path);
-      if (ret) {
-        logProvenanceEvent("delete", path, null);
-      }
     } catch (IOException e) {
       logAuditEvent(false, "delete", path);
       throw e;
