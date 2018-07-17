@@ -858,6 +858,8 @@ boolean unprotectedRenameTo(String src, String dst, long timestamp,
     if (groupname != null) {
       inode.setGroup(groupname);
     }
+    
+    inode.incrementLogicalTime();
   }
 
   /**

@@ -999,7 +999,7 @@ public abstract class INode implements Comparable<byte[]>, LinkedElement {
       }
       INodeDirectory datasetDir = getMetaEnabledParent();
       EntityManager.add(new MetadataLogEntry(datasetDir.getId(), getId(),
-          getPartitionId(), getParentId(), getLocalName(), ++logicalTime,
+          getPartitionId(), getParentId(), getLocalName(), incrementLogicalTime(),
           operation));
       save();
     }
@@ -1128,6 +1128,9 @@ public abstract class INode implements Comparable<byte[]>, LinkedElement {
     this.logicalTime = logicalTime;
   }
   
+  public int incrementLogicalTime(){
+    return ++logicalTime; 
+  }
   /**
    * Dump the subtree starting from this inode.
    *
