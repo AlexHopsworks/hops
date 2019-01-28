@@ -346,6 +346,15 @@ public class DFSConfigKeys extends CommonConfigurationKeys {
   public static final String DFS_HDFS_BLOCKS_METADATA_ENABLED =
       "dfs.datanode.hdfs-blocks-metadata.enabled";
   public static final boolean DFS_HDFS_BLOCKS_METADATA_ENABLED_DEFAULT = false;
+  public static final String DFS_HDFS_PROVENANCE_ENABLED =
+      "dfs.namenode.hdfs-provenance.enabled";
+  public static final boolean DFS_HDFS_PROVENANCE_ENABLED_DEFAULT = true;
+  public static final String DFS_HDFS_PROVENANCE_BATCH_ENABLED =
+      "dfs.namenode.hdfs-provenance-batch.enabled";
+  public static final boolean DFS_HDFS_PROVENANCE_BATCH_ENABLED_DEFAULT = true;
+  public static final String DFS_HDFS_PROVENANCE_DETAIL_ENABLED =
+      "dfs.namenode.hdfs-provenance-detail.enabled";
+  public static final boolean DFS_HDFS_PROVENANCE_DETAIL_ENABLED_DEFAULT = true;
   public static final String
       DFS_CLIENT_FILE_BLOCK_STORAGE_LOCATIONS_NUM_THREADS =
       "dfs.client.file-block-storage-locations.num-threads";

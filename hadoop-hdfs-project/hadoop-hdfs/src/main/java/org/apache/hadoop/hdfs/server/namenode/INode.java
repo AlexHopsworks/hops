@@ -28,6 +28,7 @@ import io.hops.metadata.hdfs.entity.Ace;
 import io.hops.metadata.hdfs.entity.EncodingStatus;
 import io.hops.metadata.hdfs.entity.INodeIdentifier;
 import io.hops.metadata.hdfs.entity.MetadataLogEntry;
+import io.hops.metadata.hdfs.entity.ProvenanceLogEntry;
 import io.hops.security.UsersGroups;
 import io.hops.transaction.EntityManager;
 import java.io.FileNotFoundException;
@@ -58,7 +59,10 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
+import static org.apache.hadoop.hdfs.server.namenode.FSNamesystem.LOG;
 import org.apache.hadoop.hdfs.util.ChunkedArrayList;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.LightWeightGSet.LinkedElement;
 
 /**
@@ -995,11 +999,13 @@ public abstract class INode implements Comparable<byte[]>, LinkedElement {
       }
       INodeDirectory datasetDir = getMetaEnabledParent();
       EntityManager.add(new MetadataLogEntry(datasetDir.getId(), getId(),
-          getPartitionId(), getParentId(), getLocalName(), ++logicalTime,
+          getPartitionId(), getParentId(), getLocalName(), incrementLogicalTime(),
           operation));
       save();
     }
   }
+  
+  public 
 
   boolean isPathMetaEnabled() throws TransactionContextException, StorageException {
     return getMetaEnabledParent() != null;
@@ -1122,6 +1128,9 @@ public abstract class INode implements Comparable<byte[]>, LinkedElement {
     this.logicalTime = logicalTime;
   }
   
+  public int incrementLogicalTime(){
+    return ++logicalTime; 
+  }
   /**
    * Dump the subtree starting from this inode.
    *
@@ -1208,4 +1217,58 @@ public abstract class INode implements Comparable<byte[]>, LinkedElement {
   public LinkedElement getNext() {
     return next;
   }
+  
+  /**
+   * Provenance
+   */
+  public void logProvenanceEvent(ProvenanceLogEntry.Operation op) {
+    UserGroupInformation ugi;
+    int operationUserId;
+    try {
+      ugi = NameNode.getRemoteUser();
+      operationUserId = UsersGroups.getUserID(ugi.getUserName());
+    } catch (IOException ex) {
+      LOG.error("provenance log error1", ex);
+      return;
+    }
+    String projectUser = ugi.getUserName();
+    String operationUser = projectUser;
+    String appId = ugi.getApplicationId();
+    if(appId == null) {
+       appId = "notls";
+    }
+
+    INode inode;
+    INodeDirectory datasetINode;
+    INodeDirectory projectINode;
+    try {
+      datasetINode = getMetaEnabledParent();
+      if (datasetINode == null) {
+//        LOG.info("provenance log error - not a dataset - src:" 
+//          +  getFullPathName()+ " op:" + op);
+        return;
+      }
+      projectINode = datasetINode.getParent();
+    } catch (IOException ex) {
+      LOG.error("provenance log error2", ex);
+      return;
+    }
+    long timestamp = getAccessTime();
+    String inodeName = getLocalName();
+    String projectName = projectINode.getLocalName();
+    String datasetName = datasetINode.getLocalName();
+
+    ProvenanceLogEntry ple = new ProvenanceLogEntry(id, operationUserId, appId,
+      logicalTime, logicalTime, timestamp, timestamp, parentId, partitionId,
+      projectName, datasetName, inodeName, operationUser, op);
+    try {
+      EntityManager.add(ple);
+    } catch (IOException ex) {
+      LOG.error("provenance log error3", ex);
+      return;
+    }
+  }
+  /**
+   *
+   */
 }

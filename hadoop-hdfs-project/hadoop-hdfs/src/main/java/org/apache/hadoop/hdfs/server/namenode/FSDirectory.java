@@ -29,6 +29,7 @@ import io.hops.metadata.hdfs.dal.INodeDataAccess;
 import io.hops.metadata.hdfs.entity.INodeCandidatePrimaryKey;
 import io.hops.metadata.hdfs.entity.INodeIdentifier;
 import io.hops.metadata.hdfs.entity.MetadataLogEntry;
+import io.hops.metadata.hdfs.entity.ProvenanceLogEntry;
 import io.hops.metadata.hdfs.entity.QuotaUpdate;
 import io.hops.security.Users;
 import io.hops.transaction.EntityManager;
@@ -329,6 +330,7 @@ public class FSDirectory implements Closeable {
               " blocks is persisted to the file system");
     }
     file.logMetadataEvent(MetadataLogEntry.Operation.ADD);
+    file.logProvenanceEvent(ProvenanceLogEntry.Operation.append());
   }
 
   /**
@@ -856,6 +858,8 @@ boolean unprotectedRenameTo(String src, String dst, long timestamp,
     if (groupname != null) {
       inode.setGroup(groupname);
     }
+    
+    inode.incrementLogicalTime();
   }
 
   /**
@@ -1066,10 +1070,12 @@ boolean unprotectedRenameTo(String src, String dst, long timestamp,
          addMetaDataLogForDirDeletion(child);
        }else{
          child.logMetadataEvent(MetadataLogEntry.Operation.DELETE);
+         child.logProvenanceEvent(ProvenanceLogEntry.Operation.delete());
        }
       }
     }
     targetNode.logMetadataEvent(MetadataLogEntry.Operation.DELETE);
+    targetNode.logProvenanceEvent(ProvenanceLogEntry.Operation.delete());
   }
 
   private byte getStoragePolicyID(byte inodePolicy, byte parentPolicy) {
@@ -1758,6 +1764,7 @@ boolean unprotectedRenameTo(String src, String dst, long timestamp,
     if (forRename) {
       removedNode = inodes[pos];
       removedNode.logMetadataEvent(MetadataLogEntry.Operation.DELETE);
+      removedNode.logProvenanceEvent(ProvenanceLogEntry.Operation.delete());
     } else {
       removedNode = ((INodeDirectory) inodes[pos - 1])
           .removeChild(inodes[pos]);
