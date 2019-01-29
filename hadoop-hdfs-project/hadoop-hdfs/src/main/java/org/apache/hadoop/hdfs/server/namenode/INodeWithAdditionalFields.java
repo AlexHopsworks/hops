@@ -21,6 +21,7 @@ import com.google.common.base.Preconditions;
 import io.hops.exception.StorageException;
 import io.hops.exception.TransactionContextException;
 import io.hops.metadata.hdfs.entity.MetadataLogEntry;
+import io.hops.metadata.hdfs.entity.ProvenanceLogEntry;
 import io.hops.security.UsersGroups;
 import io.hops.transaction.EntityManager;
 import org.apache.hadoop.fs.permission.FsPermission;
@@ -29,6 +30,7 @@ import org.apache.hadoop.hdfs.DFSUtil;
 
 import java.io.IOException;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
+import org.apache.hadoop.security.UserGroupInformation;
 
 public abstract class INodeWithAdditionalFields extends INode {
   
@@ -324,6 +326,51 @@ public abstract class INodeWithAdditionalFields extends INode {
           getPartitionId(), getParentId(), getLocalName(), incrementLogicalTime(),
           operation));
       save();
+    }
+  }
+  
+  @Override
+  public void logProvenanceEvent(ProvenanceLogEntry.Operation op) {
+    UserGroupInformation ugi;
+    int operationUserId;
+    try {
+      ugi = NameNode.getRemoteUser();
+      operationUserId = UsersGroups.getUserID(ugi.getUserName());
+    } catch (IOException ex) {
+      throw new RuntimeException("provenance log error1", ex);
+    }
+    String operationUser = ugi.getUserName();
+    String appId = ugi.getApplicationId();
+    if(appId == null) {
+       appId = "notls";
+    }
+
+    INode inode;
+    INodeDirectory datasetINode;
+    INodeDirectory projectINode;
+    try {
+      datasetINode = getMetaEnabledParent();
+      if (datasetINode == null) {
+//        LOG.info("provenance log error - not a dataset - src:" 
+//          +  getFullPathName()+ " op:" + op);
+        return;
+      }
+      projectINode = datasetINode.getParent();
+    } catch (IOException ex) {
+      throw new RuntimeException("provenance log error2", ex);
+    }
+    long timestamp = getAccessTime();
+    String inodeName = getLocalName();
+    long projectId = projectINode.getId();
+    long datasetId = datasetINode.getId();
+
+    ProvenanceLogEntry ple = new ProvenanceLogEntry(id, operationUserId, appId,
+      logicalTime, logicalTime, timestamp, timestamp, parentId, partitionId,
+      projectId, datasetId, inodeName, operationUser, op);
+    try {
+      EntityManager.add(ple);
+    } catch (IOException ex) {
+      throw new RuntimeException("provenance log error3", ex);
     }
   }
   

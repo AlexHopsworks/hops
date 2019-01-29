@@ -29,6 +29,7 @@ import io.hops.metadata.hdfs.dal.INodeDataAccess;
 import io.hops.metadata.hdfs.entity.INodeCandidatePrimaryKey;
 import io.hops.metadata.hdfs.entity.INodeIdentifier;
 import io.hops.metadata.hdfs.entity.MetadataLogEntry;
+import io.hops.metadata.hdfs.entity.ProvenanceLogEntry;
 import io.hops.metadata.hdfs.entity.QuotaUpdate;
 import io.hops.security.UsersGroups;
 import io.hops.transaction.EntityManager;
@@ -1024,10 +1025,12 @@ boolean unprotectedRenameTo(String src, String dst, long timestamp,
          addMetaDataLogForDirDeletion(child);
        }else{
          child.logMetadataEvent(MetadataLogEntry.Operation.DELETE);
+         child.logProvenanceEvent(ProvenanceLogEntry.Operation.delete());
        }
       }
     }
     targetNode.logMetadataEvent(MetadataLogEntry.Operation.DELETE);
+    targetNode.logProvenanceEvent(ProvenanceLogEntry.Operation.delete());
   }
 
   byte getStoragePolicyID(byte inodePolicy, byte parentPolicy) {

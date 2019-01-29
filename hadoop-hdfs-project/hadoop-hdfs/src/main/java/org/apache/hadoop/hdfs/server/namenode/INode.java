@@ -26,6 +26,7 @@ import io.hops.metadata.common.FinderType;
 import io.hops.metadata.hdfs.entity.EncodingStatus;
 import io.hops.metadata.hdfs.entity.INodeIdentifier;
 import io.hops.metadata.hdfs.entity.MetadataLogEntry;
+import io.hops.metadata.hdfs.entity.ProvenanceLogEntry;
 import io.hops.transaction.EntityManager;
 import java.io.FileNotFoundException;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -831,6 +832,7 @@ public abstract class INode implements Comparable<byte[]>, LinkedElement {
     return null;
   }
 
+  public abstract void logProvenanceEvent(ProvenanceLogEntry.Operation op);
   public abstract Long getPartitionId();
 
   public abstract void setPartitionIdNoPersistance(long partitionId);
