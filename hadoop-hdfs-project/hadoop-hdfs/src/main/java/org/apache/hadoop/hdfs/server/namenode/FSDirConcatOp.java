@@ -100,15 +100,17 @@ class FSDirConcatOp {
         }
         boolean success = false;
         try {
+          final INodesInPath trgIip = fsd.getINodesInPath4Write(target);
           // write permission for the target
           if (fsd.isPermissionEnabled()) {
             FSPermissionChecker pc = fsd.getPermissionChecker();
-            fsd.checkPathAccess(pc, target, FsAction.WRITE);
+            fsd.checkPathAccess(pc, trgIip, FsAction.WRITE);
 
             // and srcs
             for (String aSrc : srcs) {
-              fsd.checkPathAccess(pc, aSrc, FsAction.READ); // read the file
-              fsd.checkParentAccess(pc, aSrc, FsAction.WRITE); // for delete
+              final INodesInPath srcIip = fsd.getINodesInPath4Write(aSrc);
+              fsd.checkPathAccess(pc, srcIip, FsAction.READ); // read the file
+              fsd.checkParentAccess(pc, srcIip, FsAction.WRITE); // for delete
             }
           }
 
@@ -118,7 +120,6 @@ class FSDirConcatOp {
           // we put the following prerequisite for the operation
           // replication and blocks sizes should be the same for ALL the blocks
           // check the target
-          final INodesInPath trgIip = fsd.getINodesInPath4Write(target);
           final INodeFile trgInode = INodeFile.valueOf(trgIip.getLastINode(), target);
           if (trgInode.isFileStoredInDB()) {
             throw new IOException(
@@ -145,7 +146,7 @@ class FSDirConcatOp {
           }
 
           si.add(trgInode);
-          final short repl = trgInode.getFileReplication();
+          final short repl = trgInode.getBlockReplication();
 
           // now check the srcs
           boolean endSrc = false; // final src file doesn't have to have full end block
@@ -164,11 +165,11 @@ class FSDirConcatOp {
             }
 
             // check replication and blocks size
-            if (repl != srcInode.getFileReplication()) {
+            if (repl != srcInode.getBlockReplication()) {
               throw new HadoopIllegalArgumentException("concat: the source file "
                   + src + " and the target file " + target
                   + " should have the same replication: source replication is "
-                  + srcInode.getFileReplication()
+                  + srcInode.getBlockReplication()
                   + " but target replication is " + repl);
             }
 
@@ -205,7 +206,7 @@ class FSDirConcatOp {
           long timestamp = now();
           unprotectedConcat(fsd, target, srcs, timestamp);
           success = true;
-          return fsd.getAuditFileInfo(target, false);
+          return fsd.getAuditFileInfo(trgIip);
         } finally {
           RetryCacheDistributed.setState(cacheEntry, success);
         }
@@ -228,9 +229,8 @@ class FSDirConcatOp {
     // do the move
 
     final INodesInPath trgIIP = fsd.getINodesInPath4Write(target, true);
-    final INode[] trgINodes = trgIIP.getINodes();
     final INodeFile trgInode = trgIIP.getLastINode().asFile();
-    INodeDirectory trgParent = trgINodes[trgINodes.length-2].asDirectory();
+    INodeDirectory trgParent = trgIIP.getINode(-2).asDirectory();
 
     final INodeFile [] allSrcInodes = new INodeFile[srcs.length];
     for(int i = 0; i < srcs.length; i++) {
@@ -260,7 +260,7 @@ class FSDirConcatOp {
     trgInode.setModificationTimeForce(timestamp);
     trgParent.setModificationTime(timestamp);
     // update quota on the parent directory ('count' files removed, 0 space)
-    fsd.unprotectedUpdateCount(trgIIP, trgINodes.length - 1, -count, 0);
+    fsd.unprotectedUpdateCount(trgIIP, trgIIP.length() - 1, -count, 0);
     
     EntityManager
         .snapshotMaintenance(HdfsTransactionContextMaintenanceCmds.Concat,

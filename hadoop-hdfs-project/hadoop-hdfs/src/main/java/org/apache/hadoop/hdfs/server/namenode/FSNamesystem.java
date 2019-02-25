@@ -17,10 +17,6 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Lists;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.hops.common.IDsGeneratorFactory;
 import io.hops.common.IDsMonitor;
@@ -33,7 +29,6 @@ import io.hops.metadata.HdfsStorageFactory;
 import io.hops.metadata.HdfsVariables;
 import io.hops.metadata.common.entity.Variable;
 import io.hops.metadata.hdfs.dal.BlockChecksumDataAccess;
-import io.hops.metadata.hdfs.dal.CacheDirectiveDataAccess;
 import io.hops.metadata.hdfs.dal.EncodingStatusDataAccess;
 import io.hops.metadata.hdfs.dal.INodeDataAccess;
 import io.hops.metadata.hdfs.dal.RetryCacheEntryDataAccess;
@@ -42,7 +37,6 @@ import io.hops.metadata.hdfs.entity.BlockChecksum;
 import io.hops.metadata.hdfs.entity.EncodingPolicy;
 import io.hops.metadata.hdfs.entity.EncodingStatus;
 import io.hops.metadata.hdfs.entity.INodeIdentifier;
-import io.hops.metadata.hdfs.entity.LeasePath;
 import io.hops.metadata.hdfs.entity.MetadataLogEntry;
 import io.hops.metadata.hdfs.entity.ProjectedINode;
 import io.hops.metadata.hdfs.entity.ProvenanceLogEntry;
@@ -60,6 +54,9 @@ import io.hops.transaction.lock.*;
 import io.hops.transaction.lock.TransactionLockTypes.INodeLockType;
 import io.hops.transaction.lock.TransactionLockTypes.INodeResolveType;
 import io.hops.transaction.lock.TransactionLockTypes.LockType;
+import java.util.TreeMap;
+import java.util.concurrent.TimeUnit;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.HadoopIllegalArgumentException;
@@ -75,8 +72,6 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FsServerDefaults;
 import org.apache.hadoop.fs.InvalidPathException;
 import org.apache.hadoop.fs.Options;
-import org.apache.hadoop.fs.Options.Rename;
-import org.apache.hadoop.fs.ParentNotDirectoryException;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.UnresolvedLinkException;
 import org.apache.hadoop.fs.permission.AclEntry;
@@ -131,6 +126,7 @@ import org.apache.hadoop.hdfs.server.namenode.metrics.NameNodeMetrics;
 import org.apache.hadoop.hdfs.server.namenode.top.TopAuditLogger;
 import org.apache.hadoop.hdfs.server.namenode.top.TopConf;
 import org.apache.hadoop.hdfs.server.namenode.top.metrics.TopMetrics;
+import org.apache.hadoop.hdfs.server.namenode.top.window.RollingWindowManager;
 import org.apache.hadoop.hdfs.server.namenode.web.resources.NamenodeWebHdfsMethods;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeCommand;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
@@ -160,7 +156,6 @@ import org.apache.hadoop.util.Daemon;
 import org.apache.hadoop.util.DataChecksum;
 import org.apache.hadoop.util.Time;
 import org.apache.hadoop.util.VersionInfo;
-import org.mortbay.util.ajax.JSON;
 
 import javax.management.NotCompliantMBeanException;
 import javax.management.ObjectName;
@@ -196,7 +191,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.fs.BatchedRemoteIterator.BatchedListEntries;
 import org.apache.hadoop.fs.CacheFlag;
-import org.apache.hadoop.fs.DirectoryListingStartAfterNotFoundException;
 import org.apache.hadoop.fs.PathIsNotEmptyDirectoryException;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BLOCK_SIZE_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BLOCK_SIZE_KEY;
@@ -261,7 +255,6 @@ import static org.apache.hadoop.hdfs.DFSConfigKeys.FS_TRASH_INTERVAL_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.IO_FILE_BUFFER_SIZE_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.IO_FILE_BUFFER_SIZE_KEY;
 import org.apache.hadoop.hdfs.protocol.AclException;
-import org.apache.hadoop.hdfs.protocol.CacheDirective;
 import org.apache.hadoop.hdfs.protocol.CacheDirectiveEntry;
 import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
 import org.apache.hadoop.hdfs.protocol.CachePoolEntry;
@@ -288,6 +281,13 @@ import org.apache.log4j.Appender;
 import org.apache.log4j.AsyncAppender;
 import org.apache.log4j.Logger;
 import static org.apache.hadoop.util.ExitUtil.terminate;
+import org.codehaus.jackson.map.ObjectMapper;
+import org.mortbay.util.ajax.JSON;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
 
 /**
  * ************************************************
@@ -320,11 +320,6 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   @VisibleForTesting
   boolean isAuditEnabled() {
     return !isDefaultAuditLogger || auditLog.isInfoEnabled();
-  }
-
-  private HdfsFileStatus getAuditFileInfo(String path, boolean resolveSymlink)
-      throws IOException {
-    return dir.getAuditFileInfo(path, resolveSymlink);
   }
 
   private void logAuditEvent(boolean succeeded, String cmd, String src)
@@ -411,14 +406,10 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   private final CacheManager cacheManager;
   private final DatanodeStatistics datanodeStatistics;
 
-  // whether setStoragePolicy is allowed.
-  private final boolean isStoragePolicyEnabled;
-
   // Block pool ID used by this namenode
   //HOP made it final and now its value is read from the config file. all
   // namenodes should have same block pool id
   private final String blockPoolId;
-
 
   final LeaseManager leaseManager = new LeaseManager(this);
 
@@ -504,6 +495,9 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   
   private volatile AtomicBoolean forceReadTheSafeModeFromDB = new AtomicBoolean(true);
   
+  private final TopConf topConf;
+  private TopMetrics topMetrics;
+
   /**
    * Notify that loading of this FSDirectory is complete, and
    * it is imageLoaded for use
@@ -642,10 +636,6 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       this.datanodeStatistics =
           blockManager.getDatanodeManager().getDatanodeStatistics();
 
-      this.isStoragePolicyEnabled =
-          conf.getBoolean(DFSConfigKeys.DFS_STORAGE_POLICY_ENABLED_KEY,
-                          DFSConfigKeys.DFS_STORAGE_POLICY_ENABLED_DEFAULT);
-
       this.fsOwner = UserGroupInformation.getCurrentUser();
       this.superGroup = conf.get(DFS_PERMISSIONS_SUPERUSERGROUP_KEY,
           DFS_PERMISSIONS_SUPERUSERGROUP_DEFAULT);
@@ -717,6 +707,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       this.dtSecretManager = createDelegationTokenSecretManager(conf);
       this.dir = new FSDirectory(this, conf);
       this.cacheManager = new CacheManager(this, conf, blockManager);
+      this.topConf = new TopConf(conf);
       this.auditLoggers = initAuditLoggers(conf);
       this.isDefaultAuditLogger = auditLoggers.size() == 1 &&
           auditLoggers.get(0) instanceof DefaultAuditLogger;
@@ -818,13 +809,9 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     }
 
     // Add audit logger to calculate top users
-    if (conf.getBoolean(DFSConfigKeys.NNTOP_ENABLED_KEY,
-        DFSConfigKeys.NNTOP_ENABLED_DEFAULT)) {
-      String sessionId = conf.get(DFSConfigKeys.DFS_METRICS_SESSION_ID_KEY);
-      TopConf nntopConf = new TopConf(conf);
-      TopMetrics.initSingleton(conf, "NAMENODE", sessionId,
-          nntopConf.nntopReportingPeriodsMs);
-      auditLoggers.add(new TopAuditLogger());
+    if (topConf.isEnabled) {
+      topMetrics = new TopMetrics(conf, topConf.nntopReportingPeriodsMs);
+      auditLoggers.add(new TopAuditLogger(topMetrics));
     }
 
     return Collections.unmodifiableList(auditLoggers);
@@ -916,13 +903,13 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     try {
       blockManager.getDatanodeManager().markAllDatanodesStale();
 
-      if (isLeader()) {
-        // the node is starting and directly leader, this means that no NN was alive before
-        // Only need to re-process the queue, If not in SafeMode.
-        if (!isInSafeMode()) {
-          LOG.info("Reprocessing replication and invalidation queues");
-          initializeReplQueues();
-        } else {
+      // Only need to re-process the queue, If not in SafeMode.
+      if (!isInSafeMode()) {
+        LOG.info("Reprocessing replication and invalidation queues");
+        initializeReplQueues();
+      } else {
+        if (isLeader()) {
+          // the node is starting and directly leader, this means that no NN was alive before
           HdfsVariables.resetMisReplicatedIndex();
         }
       }
@@ -1027,7 +1014,11 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       }
     }
   }
-  
+
+  boolean isPermissionEnabled() {
+    return isPermissionEnabled;
+  }
+
   /**
    * We already know that the safemode is on. We will throw a RetriableException
    * if the safemode is not manual or caused by low resource.
@@ -1087,10 +1078,6 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     return fsRunning;
   }
 
-  long getDefaultBlockSize() {
-    return serverDefaults.getBlockSize();
-  }
-
   FsServerDefaults getServerDefaults() {
     return serverDefaults;
   }
@@ -1113,121 +1100,16 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    *
    * @throws IOException
    */
-  void setPermissionSTO(final String src1, final FsPermission permission)
-      throws
-      IOException {
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src1);
-    final String src = dir.resolvePath(src1, pathComponents, dir);
-    boolean txFailed = true;
-    //we just want to lock the subtree the permission are checked in setPermissionSTOInt
-    final INodeIdentifier inode = lockSubtreeAndCheckOwnerAndParentPermission(src, true,
-             null, SubTreeOperation.Type.SET_PERMISSION_STO);
-    final boolean isSTO = inode != null;
+  void setPermission(String src, FsPermission permission) throws IOException {
+    HdfsFileStatus auditStat;
     try {
-      new HopsTransactionalRequestHandler(HDFSOperationType.SUBTREE_SETPERMISSION, src) {
-        @Override
-        public void acquireLock(TransactionLocks locks) throws IOException {
-          LockFactory lf = getInstance();
-          INodeLock il = lf.getINodeLock( INodeLockType.WRITE, INodeResolveType.PATH,  src)
-                  .setNameNodeID(nameNode.getId())
-                  .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes())
-                  .skipReadingQuotaAttr(!dir.isQuotaEnabled());
-          if (isSTO) {
-            il.setIgnoredSTOInodes(inode.getInodeId());
-          }
-          locks.add(il).add(lf.getBlockLock());
-          locks.add(lf.getAcesLock());
-        }
-
-        @Override
-        public Object performTask() throws IOException {
-          try {
-            setPermissionSTOInt(src, permission, isSTO);
-          } catch (AccessControlException e) {
-            logAuditEvent(false, "setPermission", src);
-            throw e;
-          }
-          return null;
-        }
-      }.handle(this);
-      txFailed = false;
-    } finally {
-      if(txFailed){
-        if(inode!=null){
-          unlockSubtree(src, inode.getInodeId());
-        }
-      }
-    }
-
-  }
-
-  private void setPermissionSTOInt(String src, FsPermission permission,boolean isSTO)
-      throws
-      IOException {
-    HdfsFileStatus resultingStat;
-    FSPermissionChecker pc = getPermissionChecker();
-    checkNameNodeSafeMode("Cannot set permission for " + src);
-    checkOwner(pc, src);
-    dir.setPermission(src, permission);
-    resultingStat = getAuditFileInfo(src, false);
-    logAuditEvent(true, "setPermission", src, null, resultingStat);
-
-    //remove sto from
-    if(isSTO){
-      INodesInPath inodesInPath = dir.getINodesInPath(src, false);
-      INode[] nodes = inodesInPath.getINodes();
-      INode inode = nodes[nodes.length - 1];
-      if (inode != null && inode.isSTOLocked()) {
-        inode.setSubtreeLocked(false);
-        EntityManager.update(inode);
-      }
-      EntityManager.remove(new SubTreeOperation(getSubTreeLockPathPrefix(src)));
-    }
-  }
-
-  /**
-   * Set permissions for an existing file.
-   *
-   * @throws IOException
-   */
-  void setPermission(final String src1, final FsPermission permission)
-      throws
-      IOException {
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src1);
-    final String src = dir.resolvePath(src1, pathComponents, dir);
-    new HopsTransactionalRequestHandler(HDFSOperationType.SET_PERMISSION, src) {
-      @Override
-      public void acquireLock(TransactionLocks locks) throws IOException {
-        LockFactory lf = getInstance();
-        INodeLock il = lf.getINodeLock(INodeLockType.WRITE, INodeResolveType.PATH, src)
-                .setNameNodeID(nameNode.getId())
-                .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes());
-        locks.add(il).add(lf.getBlockLock());
-      }
-
-      @Override
-      public Object performTask() throws IOException {
-        try {
-          setPermissionInt(src, permission);
-        } catch (AccessControlException e) {
-          logAuditEvent(false, "setPermission", src);
-          throw e;
-        }
-        return null;
-      }
-    }.handle(this);
-  }
-
-  private void setPermissionInt(String src, FsPermission permission)
-      throws
-      IOException {
-    HdfsFileStatus resultingStat;
-    FSPermissionChecker pc = getPermissionChecker();
-    checkNameNodeSafeMode("Cannot set permission for " + src);
-    checkOwner(pc, src);
-    dir.setPermission(src, permission);
-    resultingStat = getAuditFileInfo(src, false);
-    logAuditEvent(true, "setPermission", src, null, resultingStat);
+      checkNameNodeSafeMode("Cannot set permission for " + src);
+      auditStat = FSDirAttrOp.setPermission(dir, src, permission);
+    } catch (AccessControlException e) {
+      logAuditEvent(false, "setPermission", src);
+      throw e;
+    } 
+    logAuditEvent(true, "setPermission", src, null, auditStat);
   }
 
   /**
@@ -1235,139 +1117,31 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    *
    * @throws IOException
    */
-  void setOwnerSTO(final String src1, final String username, final String group)
-      throws
-      IOException {
-    //only for testing STO
-    saveTimes();
-
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src1);
-    final String src = dir.resolvePath(src1, pathComponents);
-    boolean txFailed = true;
-    //we just want to lock the subtree the permission are checked in setOwnerSTOInt
-    final INodeIdentifier inode =  lockSubtreeAndCheckOwnerAndParentPermission(src, true,
-             null, SubTreeOperation.Type.SET_OWNER_STO);
-    final boolean isSTO = inode != null;
-    try{
-    new HopsTransactionalRequestHandler(HDFSOperationType.SET_OWNER_SUBTREE, src) {
-      @Override
-      public void acquireLock(TransactionLocks locks) throws IOException {
-        LockFactory lf = getInstance();
-        INodeLock il = lf.getINodeLock( INodeLockType.WRITE, INodeResolveType.PATH,  src)
-                .setNameNodeID(nameNode.getId())
-                .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes())
-                .skipReadingQuotaAttr(!dir.isQuotaEnabled());
-        if (isSTO){
-          il.setIgnoredSTOInodes(inode.getInodeId());
-        }
-        locks.add(il).add(lf.getBlockLock()).add(lf.getAcesLock());
-      }
-
-        @Override
-        public Object performTask() throws IOException {
-          try {
-            setOwnerSTOInt(src, username, group,isSTO);
-          } catch (AccessControlException e) {
-            logAuditEvent(false, "setOwner", src);
-            throw e;
-          }
-          return null;
-        }
-      }.handle(this);
-      txFailed = false;
-    }finally{
-      if(txFailed){
-        if(inode!=null){
-          unlockSubtree(src,inode.getInodeId());
-        }
-      }
+  void setOwner(String src, String username, String group)
+      throws IOException {
+    HdfsFileStatus auditStat;
+    try {
+      checkNameNodeSafeMode("Cannot set owner for " + src);
+      auditStat = FSDirAttrOp.setOwner(dir, src, username, group);
+    } catch (AccessControlException e) {
+      logAuditEvent(false, "setOwner", src);
+      throw e;
     }
+    logAuditEvent(true, "setOwner", src, null, auditStat);
   }
 
-  private void setOwnerSTOInt(String src, String username, String group, boolean isSTO)
-      throws
-      IOException {
-    HdfsFileStatus resultingStat;
-    FSPermissionChecker pc = getPermissionChecker();
-    checkNameNodeSafeMode("Cannot set owner for " + src);
-    checkOwner(pc, src);
-    if (!pc.isSuperUser()) {
-      if (username != null && !pc.getUser().equals(username)) {
-        throw new AccessControlException("Non-super user cannot change owner");
-      }
-      if (group != null && !pc.containsGroup(group)) {
-        throw new AccessControlException("User does not belong to " + group);
-      }
+  public static class GetBlockLocationsResult {
+    final INodesInPath iip;
+    public final LocatedBlocks blocks;
+    boolean updateAccessTime() {
+      return iip != null;
     }
-    dir.setOwner(src, username, group);
-    resultingStat = getAuditFileInfo(src, false);
-    logAuditEvent(true, "setOwner", src, null, resultingStat);
-    if(isSTO){
-      INodesInPath inodesInPath = dir.getINodesInPath(src, false);
-      INode[] nodes = inodesInPath.getINodes();
-      INode inode = nodes[nodes.length - 1];
-      if (inode != null && inode.isSTOLocked()) {
-        inode.setSubtreeLocked(false);
-        EntityManager.update(inode);
-      }
-      EntityManager.remove(new SubTreeOperation(getSubTreeLockPathPrefix(src)));
+    private GetBlockLocationsResult(INodesInPath iip, LocatedBlocks blocks) {
+      this.iip = iip;
+      this.blocks = blocks;
     }
   }
-
-  /**
-   * Set owner for an existing file.
-   *
-   * @throws IOException
-   */
-  void setOwner(final String src, final String username, final String group)
-      throws
-      IOException {
-    new HopsTransactionalRequestHandler(HDFSOperationType.SET_OWNER, src) {
-
-      @Override
-      public void acquireLock(TransactionLocks locks) throws IOException {
-        LockFactory lf = getInstance();
-        INodeLock il = lf.getINodeLock(INodeLockType.WRITE, INodeResolveType.PATH, src)
-                .setNameNodeID(nameNode.getId())
-                .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes());
-        locks.add(il).add(lf.getBlockLock());
-      }
-
-      @Override
-      public Object performTask() throws IOException {
-        try {
-          setOwnerInt(src, username, group);
-        } catch (AccessControlException e) {
-          logAuditEvent(false, "setOwner", src);
-          throw e;
-        }
-        return null;
-      }
-    }.handle(this);
-  }
-
-  private void setOwnerInt(String src, String username, String group)
-      throws
-      IOException {
-    HdfsFileStatus resultingStat;
-    FSPermissionChecker pc = getPermissionChecker();
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src);
-    checkNameNodeSafeMode("Cannot set owner for " + src);
-    src = dir.resolvePath(src, pathComponents);
-    checkOwner(pc, src);
-    if (!pc.isSuperUser()) {
-      if (username != null && !pc.getUser().equals(username)) {
-        throw new AccessControlException("Non-super user cannot change owner");
-      }
-      if (group != null && !pc.containsGroup(group)) {
-        throw new AccessControlException("User does not belong to " + group);
-      }
-    }
-    dir.setOwner(src, username, group);
-    resultingStat = getAuditFileInfo(src, false);
-    logAuditEvent(true, "setOwner", src, null, resultingStat);
-  }
-
+  
   /**
    * Get block locations within the specified range.
    *
@@ -1382,124 +1156,118 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     // The lock upgrade exception is thrown when the inode access time stamp is
     // updated while holding shared lock on the inode. In this case retry the operation
     // using an exclusive lock.
-    try{
-      return getBlockLocationsWithLock(clientMachine, src, offset, length, INodeLockType.READ);
-    }catch(LockUpgradeException e){
-      LOG.debug("Encountered LockUpgradeException while reading "+src+". Retrying the operation using exclusive locks");
-      return getBlockLocationsWithLock(clientMachine, src, offset, length, INodeLockType.WRITE);
-    }
-  }
-
-  LocatedBlocks getBlockLocationsWithLock(final String clientMachine, final String src1,
-                                          final long offset, final long length, final INodeLockType lockType) throws IOException {
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src1);
-    final String src = dir.resolvePath(src1, pathComponents);
-    HopsTransactionalRequestHandler getBlockLocationsHandler =
-            new HopsTransactionalRequestHandler(
-                    HDFSOperationType.GET_BLOCK_LOCATIONS, src) {
-              @Override
-              public void acquireLock(TransactionLocks locks) throws IOException {
-                LockFactory lf = getInstance();
-                INodeLock il = lf.getINodeLock( lockType, INodeResolveType.PATH, src)
-                        .setNameNodeID(nameNode.getId())
-                        .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes())
-                        .skipReadingQuotaAttr(!dir.isQuotaEnabled());
-                locks.add(il).add(lf.getBlockLock())
-                        .add(lf.getBlockRelated(BLK.RE, BLK.ER, BLK.CR, BLK.UC, BLK.CA));
-                locks.add(lf.getAcesLock());
-              }
-
-          @Override
-          public Object performTask() throws IOException {
-            LocatedBlocks blocks =
-                getBlockLocationsInternal(src, offset, length, true, true,
-                    true);
-            if (blocks != null && !blocks
-                .hasPhantomBlock()) { // no need to sort phantom datanodes
-              blockManager.getDatanodeManager()
-                  .sortLocatedBlocks(clientMachine, blocks.getLocatedBlocks());
-
-             // lastBlock is not part of getLocatedBlocks(), might need to sort it too
-              LocatedBlock lastBlock = blocks.getLastLocatedBlock();
-              if (lastBlock != null) {
-                ArrayList<LocatedBlock> lastBlockList = Lists.newArrayListWithCapacity(1);
-                lastBlockList.add(lastBlock);
-                blockManager.getDatanodeManager()
-                    .sortLocatedBlocks(clientMachine, lastBlockList);
-                  }
-                }
-                return blocks;
-              }
-            };
-    LocatedBlocks locatedBlocks = (LocatedBlocks) getBlockLocationsHandler.handle(this);
-    logAuditEvent(true, "open", src);
-    return locatedBlocks;
-  }
-
-  /**
-   * Get block locations within the specified range.
-   *
-   * @throws FileNotFoundException,
-   *     UnresolvedLinkException, IOException
-   * @see ClientProtocol#getBlockLocations(String, long, long)
-   */
-  public LocatedBlocks getBlockLocations(final String src1, final long offset,
-      final long length, final boolean doAccessTime,
-      final boolean needBlockToken, final boolean checkSafeMode)
-      throws IOException {
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src1);
-    final String src = dir.resolvePath(src1, pathComponents, dir);
-    HopsTransactionalRequestHandler getBlockLocationsHandler =
-        new HopsTransactionalRequestHandler(
-            HDFSOperationType.GET_BLOCK_LOCATIONS, src) {
-          @Override
-          public void acquireLock(TransactionLocks locks) throws IOException {
-            LockFactory lf = getInstance();
-            INodeLock il = lf.getINodeLock(INodeLockType.READ, INodeResolveType.PATH, src)
-                    .setNameNodeID(nameNode.getId())
-                    .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes());
-            locks.add(il).add(lf.getBlockLock())
-                .add(lf.getBlockRelated(BLK.RE, BLK.ER, BLK.CR, BLK.UC, BLK.CA));
-          }
-
-          @Override
-          public Object performTask() throws IOException {
-            return getBlockLocationsInternal(src, offset, length, doAccessTime,
-                needBlockToken, checkSafeMode);
-          }
-        };
-    return (LocatedBlocks) getBlockLocationsHandler.handle(this);
-  }
-
-  /**
-   * Get block locations within the specified range.
-   *
-   * @throws FileNotFoundException,
-   *     UnresolvedLinkException, IOException
-   * @see ClientProtocol#getBlockLocations(String, long, long)
-   */
-  private LocatedBlocks getBlockLocationsInternal(String src, long offset,
-      long length,
-      boolean doAccessTime, boolean needBlockToken, boolean checkSafeMode)
-      throws IOException {
-    FSPermissionChecker pc = getPermissionChecker();
+    LocatedBlocks result = null;
     try {
-      return getBlockLocationsInt(pc, src, offset, length, doAccessTime,
-          needBlockToken, checkSafeMode);
+      try {
+        result = getBlockLocationsWithLock(clientMachine, src, offset, length, INodeLockType.READ);
+      } catch (LockUpgradeException e) {
+        LOG.debug("Encountered LockUpgradeException while reading " + src
+            + ". Retrying the operation using exclusive locks");
+        result = getBlockLocationsWithLock(clientMachine, src, offset, length, INodeLockType.WRITE);
+      }
     } catch (AccessControlException e) {
       logAuditEvent(false, "open", src);
       throw e;
     }
+    logAuditEvent(true, "open", src);
+    return result;
   }
 
+  LocatedBlocks getBlockLocationsWithLock(final String clientMachine, final String srcArg,
+      final long offset, final long length, final INodeLockType lockType) throws IOException {
+    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(srcArg);
+    final String src = dir.resolvePath(srcArg, pathComponents);
+    HopsTransactionalRequestHandler getBlockLocationsHandler = new HopsTransactionalRequestHandler(
+        HDFSOperationType.GET_BLOCK_LOCATIONS, src) {
+      @Override
+      public void acquireLock(TransactionLocks locks) throws IOException {
+        LockFactory lf = getInstance();
+        INodeLock il = lf.getINodeLock(lockType, INodeResolveType.PATH, src)
+            .setNameNodeID(nameNode.getId())
+            .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes())
+            .skipReadingQuotaAttr(!dir.isQuotaEnabled());
+        locks.add(il).add(lf.getBlockLock())
+            .add(lf.getBlockRelated(BLK.RE, BLK.ER, BLK.CR, BLK.UC, BLK.CA));
+        locks.add(lf.getAcesLock());
+      }
 
-  private LocatedBlocks getBlockLocationsInt(FSPermissionChecker pc, String src,
-      long offset, long length, boolean doAccessTime, boolean needBlockToken,
-      boolean checkSafeMode)
+      @Override
+      public Object performTask() throws IOException {
+        GetBlockLocationsResult res = null;
+        
+        res = getBlockLocationsInt(src, offset, length, true, true);
+
+        if (res.updateAccessTime()) {
+          final long now = now();
+          try {
+            INode inode = res.iip.getLastINode();
+            boolean updateAccessTime = now > inode.getAccessTime() + getAccessTimePrecision();
+            if (!isInSafeMode() && updateAccessTime) {
+              boolean changed = FSDirAttrOp.setTimes(dir,
+                  inode, -1, now, false);
+            }
+          } catch (Throwable e) {
+            LOG.warn("Failed to update the access time of " + src, e);
+          }
+        }
+
+        LocatedBlocks blocks = res.blocks;
+
+        if (blocks != null && !blocks
+            .hasPhantomBlock()) { // no need to sort phantom datanodes
+          blockManager.getDatanodeManager()
+              .sortLocatedBlocks(clientMachine, blocks.getLocatedBlocks());
+
+          // lastBlock is not part of getLocatedBlocks(), might need to sort it too
+          LocatedBlock lastBlock = blocks.getLastLocatedBlock();
+          if (lastBlock != null) {
+            ArrayList<LocatedBlock> lastBlockList = Lists.newArrayList(lastBlock);
+            blockManager.getDatanodeManager().sortLocatedBlocks(
+                clientMachine, lastBlockList);
+          }
+        }
+        return blocks;
+      }
+    };
+
+    return (LocatedBlocks) getBlockLocationsHandler.handle(this);
+
+  }
+
+  /**
+   * Get block locations within the specified range.
+   *
+   * @throws IOException
+   * @see ClientProtocol#getBlockLocations(String, long, long)
+   */
+  public GetBlockLocationsResult getBlockLocations(final String srcArg, final long offset,
+      final long length, final boolean needBlockToken, final boolean checkSafeMode)
       throws IOException {
-    if (isPermissionEnabled) {
-      checkPathAccess(pc, src, FsAction.READ);
-    }
+    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(srcArg);
+    final String src = dir.resolvePath(srcArg, pathComponents, dir);
+    HopsTransactionalRequestHandler getBlockLocationsHandler = new HopsTransactionalRequestHandler(
+        HDFSOperationType.GET_BLOCK_LOCATIONS, src) {
+      @Override
+      public void acquireLock(TransactionLocks locks) throws IOException {
+        LockFactory lf = getInstance();
+        INodeLock il = lf.getINodeLock(INodeLockType.READ, INodeResolveType.PATH, src)
+            .setNameNodeID(nameNode.getId())
+            .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes());
+        locks.add(il).add(lf.getBlockLock())
+            .add(lf.getBlockRelated(BLK.RE, BLK.ER, BLK.CR, BLK.UC, BLK.CA));
+      }
+
+      @Override
+      public Object performTask() throws IOException {
+        return getBlockLocationsInt(src, offset, length, needBlockToken, checkSafeMode);
+      }
+    };
+    return (GetBlockLocationsResult) getBlockLocationsHandler.handle(this);
+  }
+  
+  private GetBlockLocationsResult getBlockLocationsInt(final String src, final long offset,
+      final long length, final boolean needBlockToken, final boolean checkSafeMode)
+      throws IOException {
 
     if (offset < 0) {
       throw new HadoopIllegalArgumentException(
@@ -1510,17 +1278,17 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
           "Negative length is not supported. File: " + src);
     }
 
-    LocatedBlocks ret;
+    GetBlockLocationsResult ret;
     final INodeFile inodeFile = INodeFile.valueOf(dir.getINode(src), src);
     if (inodeFile.isFileStoredInDB()) {
       LOG.debug("SMALL_FILE The file is stored in the database. Returning Phantom Blocks");
-      ret = getPhantomBlockLocationsUpdateTimes(src, offset, length, doAccessTime, needBlockToken);
+      ret = getPhantomBlockLocationsUpdateTimes(src, needBlockToken);
     } else {
-      ret = getBlockLocationsUpdateTimes(src, offset, length, doAccessTime, needBlockToken);
+      ret = getBlockLocationsInt(src, offset, length, needBlockToken);
     }
 
     if (checkSafeMode && isInSafeMode()) {
-      for (LocatedBlock b : ret.getLocatedBlocks()) {
+      for (LocatedBlock b : ret.blocks.getLocatedBlocks()) {
         // if safe mode & no block locations yet then throw SafeModeException
         if ((b.getLocations() == null) || (b.getLocations().length == 0)) {
           SafeModeException se = new SafeModeException(
@@ -1529,7 +1297,6 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
         }
       }
     }
-    inodeFile.logProvenanceEvent(ProvenanceLogEntry.Operation.getBlockLocations());
     return ret;
   }
 
@@ -1538,61 +1305,60 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    * access times if necessary.
    */
 
-  private LocatedBlocks getPhantomBlockLocationsUpdateTimes(String src,
-      long offset, long length, boolean doAccessTime, boolean needBlockToken)
-      throws IOException {
-    for (int attempt = 0; attempt < 2; attempt++) {
-      // if the namenode is in safe mode, then do not update access time
-      if (isInSafeMode()) {
-        doAccessTime = false;
-      }
+  private GetBlockLocationsResult getPhantomBlockLocationsUpdateTimes(String src, boolean needBlockToken) throws
+      IOException {
+    
+    FSPermissionChecker pc = getPermissionChecker();
 
-      long now = now();
-      final INodeFile inode = INodeFile.valueOf(dir.getINode(src), src);
-      if (doAccessTime && isAccessTimeSupported()) {
-        if (now <= inode.getAccessTime() + getAccessTimePrecision()) {
-          // if we have to set access time but we only have a read lock, then
-          // restart this entire operation with the writeLock.
-          if (attempt == 0) {
-            continue;
-          }
-        }
-        dir.setTimes(inode, -1, now, false);
-      }
+    final INodesInPath iip = dir.getINodesInPath(src, true);
+    final INodeFile inode = INodeFile.valueOf(iip.getLastINode(), src);
 
-      return blockManager
+    if (isPermissionEnabled) {
+      dir.checkPathAccess(pc, iip, FsAction.READ);
+    }
+    
+    final LocatedBlocks blocks = blockManager
           .createPhantomLocatedBlocks(inode, inode.getFileDataInDB(),
               inode.isUnderConstruction(), needBlockToken);
-    }
-    return null; // can never reach here
+    
+    final long now = now();
+    boolean updateAccessTime = isAccessTimeSupported() && !isInSafeMode()
+        && now > inode.getAccessTime() + getAccessTimePrecision();
+    return new GetBlockLocationsResult(updateAccessTime ? iip : null, blocks);
+    
   }
 
   /*
    * Get block locations within the specified range, updating the
    * access times if necessary.
    */
-  private LocatedBlocks getBlockLocationsUpdateTimes(String src, long offset,
-      long length, boolean doAccessTime, boolean needBlockToken)
+  private GetBlockLocationsResult getBlockLocationsInt(String src, long offset,
+      long length, boolean needBlockToken)
       throws IOException {
-      // if the namenode is in safe mode, then do not update access time
-      if (isInSafeMode()) {
-        doAccessTime = false;
-      }
-      long now = now();
-      final INodeFile inode = INodeFile.valueOf(dir.getINode(src), src);
-      if (doAccessTime && isAccessTimeSupported()) {
-        dir.setTimes(inode, -1, now, false);
-      }
-      final long fileSize = inode.computeFileSizeNotIncludingLastUcBlock();
-      boolean isUc = inode.isUnderConstruction();
+    FSPermissionChecker pc = getPermissionChecker();
 
-    LocatedBlocks blocks = blockManager.createLocatedBlocks(inode.getBlocks(), fileSize,
-        isUc, offset, length, needBlockToken);
+    final INodesInPath iip = dir.getINodesInPath(src, true);
+    final INodeFile inode = INodeFile.valueOf(iip.getLastINode(), src);
+
+    if (isPermissionEnabled) {
+      dir.checkPathAccess(pc, iip, FsAction.READ);
+    }
+
+    final long fileSize = inode.computeFileSizeNotIncludingLastUcBlock();
+    boolean isUc = inode.isUnderConstruction();
+
+    final LocatedBlocks blocks = blockManager.createLocatedBlocks(
+        inode.getBlocks(), fileSize, isUc, offset, length, needBlockToken);
+
     // Set caching information for the located blocks.
     for (LocatedBlock lb : blocks.getLocatedBlocks()) {
       cacheManager.setCachedLocations(lb, inode.getId());
     }
-    return blocks;      
+
+    final long now = now();
+    boolean updateAccessTime = isAccessTimeSupported() && !isInSafeMode()
+        && now > inode.getAccessTime() + getAccessTimePrecision();
+    return new GetBlockLocationsResult(updateAccessTime ? iip : null, blocks);
   }
 
   /**
@@ -1623,145 +1389,41 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    * The access time is precise up to an hour. The transaction, if needed, is
    * written to the edits log but is not flushed.
    */
-  void setTimes(final String src1, final long mtime, final long atime)
-      throws IOException {
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src1);
-    final String src = dir.resolvePath(src1, pathComponents);
-    new HopsTransactionalRequestHandler(HDFSOperationType.SET_TIMES, src) {
-      @Override
-      public void acquireLock(TransactionLocks locks) throws IOException {
-        LockFactory lf = getInstance();
-        INodeLock il = lf.getINodeLock(INodeLockType.WRITE, INodeResolveType.PATH, src)
-                .setNameNodeID(nameNode.getId())
-                .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes());
-        locks.add(il).add(lf.getBlockLock());
-        locks.add(lf.getAcesLock());
-      }
-
-      @Override
-      public Object performTask() throws IOException {
-        try {
-          setTimesInt(src, mtime, atime);
-        } catch (AccessControlException e) {
-          logAuditEvent(false, "setTimes", src);
-          throw e;
-        }
-        return null;
-      }
-    }.handle(this);
-  }
-
-  private void setTimesInt(String src, long mtime, long atime)
-      throws IOException {
-    if (!isAccessTimeSupported() && atime != -1) {
-      throw new IOException("Access time for hdfs is not configured. " +
-          " Please set " + DFS_NAMENODE_ACCESSTIME_PRECISION_KEY +
-          " configuration parameter.");
+  void setTimes(String src, long mtime, long atime) throws IOException {
+    HdfsFileStatus auditStat;
+    try {
+      auditStat = FSDirAttrOp.setTimes(dir, src, mtime, atime);
+    } catch (AccessControlException e) {
+      logAuditEvent(false, "setTimes", src);
+      throw e;
     }
-    HdfsFileStatus resultingStat;
-    FSPermissionChecker pc = getPermissionChecker();
-    // Write access is required to set access and modification times
-    if (isPermissionEnabled) {
-      checkPathAccess(pc, src, FsAction.WRITE);
-    }
-    INode inode = dir.getINode(src);
-    if (inode != null) {
-      dir.setTimes(inode, mtime, atime, true);
-      resultingStat = getAuditFileInfo(src, false);
-    } else {
-      throw new FileNotFoundException(
-          "File/Directory " + src + " does not exist.");
-    }
-    logAuditEvent(true, "setTimes", src, null, resultingStat);
+    logAuditEvent(true, "setTimes", src, null, auditStat);
   }
 
   /**
    * Create a symbolic link.
    */
-  void createSymlink(final String target, final String link1,
-      final PermissionStatus dirPerms, final boolean createParent)
-      throws IOException {
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(link1);
-    final String link = dir.resolvePath(link1, pathComponents, dir);
-    new HopsTransactionalRequestHandler(HDFSOperationType.CREATE_SYM_LINK,
-        link) {
-      @Override
-      public void acquireLock(TransactionLocks locks) throws IOException {
-        LockFactory lf = getInstance();
-        INodeLock il = lf.getINodeLock(INodeLockType.WRITE, INodeResolveType.PATH,  link)
-                .setNameNodeID(nameNode.getId())
-                .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes());
-        locks.add(il).add(lf.getAcesLock());
-        if(isRetryCacheEnabled) {
-          locks.add(lf.getRetryCacheEntryLock(Server.getClientId(),
-              Server.getCallId()));
-        }
-      }
-
-      @Override
-      public Object performTask() throws IOException {
-        final CacheEntry cacheEntry = RetryCacheDistributed.waitForCompletion(retryCache);
-        if (cacheEntry != null && cacheEntry.isSuccess()) {
-          return null; // Return previous response
-        }
-        boolean success = false;
-        try {
-          createSymlinkInt(target, link, dirPerms, createParent);
-          success = true;
-        } catch (AccessControlException e) {
-          logAuditEvent(false, "createSymlink", link, target, null);
-          throw e;
-        } finally {
-          RetryCacheDistributed.setState(cacheEntry, success);
-        }
-        return null;
-      }
-    }.handle(this);
-  }
-
-  private void createSymlinkInt(String target, String link,
+  @SuppressWarnings("deprecation")
+  void createSymlink(String target, String link,
       PermissionStatus dirPerms, boolean createParent)
       throws IOException {
-    HdfsFileStatus resultingStat;
-    FSPermissionChecker pc = getPermissionChecker();
-    if (!createParent) {
-      verifyParentDir(link);
+    if (!FileSystem.areSymlinksEnabled()) {
+      throw new UnsupportedOperationException("Symlinks not supported");
     }
-    createSymlinkInternal(pc, target, link, dirPerms, createParent);
-    resultingStat = getAuditFileInfo(link, false);
-    logAuditEvent(true, "createSymlink", link, target, resultingStat);
-  }
-
-  /**
-   * Create a symbolic link.
-   */
-  private void createSymlinkInternal(FSPermissionChecker pc, String target,
-      String link, PermissionStatus dirPerms, boolean createParent)
-      throws IOException {
-    if (NameNode.stateChangeLog.isDebugEnabled()) {
-      NameNode.stateChangeLog.debug("DIR* NameSystem.createSymlink: target=" +
-          target + " link=" + link);
+    HdfsFileStatus auditStat = null;
+    try {
+      checkNameNodeSafeMode("Cannot create symlink " + link);
+      auditStat = FSDirSymlinkOp.createSymlinkInt(this, target, link, dirPerms,
+                                                  createParent);
+      if(auditStat==null){
+        return;
+      }
+    } catch (AccessControlException e) {
+      logAuditEvent(false, "createSymlink", link, target, null);
+      throw e;
     }
-    checkNameNodeSafeMode("Cannot create symlink " + link);
-    if (FSDirectory.isReservedName(target)) {
-      throw new InvalidPathException("Invalid target name: " + target);
-    }
-    if (!DFSUtil.isValidName(link)) {
-      throw new InvalidPathException("Invalid file name: " + link);
-    }
-    if (!dir.isValidToCreate(link)) {
-      throw new IOException("failed to create link " + link +
-          " either because the filename is invalid or the file exists");
-    }
-    if (isPermissionEnabled) {
-      checkAncestorAccess(pc, link, FsAction.WRITE);
-    }
-    // validate that we have enough inodes.
-    checkFsObjectLimit();
-
-    // add symbolic link to namespace
-    addSymlink(link, target, dirPerms, createParent);
-  }
+    logAuditEvent(true, "createSymlink", link, target, auditStat);
+}
 
   /**
    * Set replication for an existing file.
@@ -1778,66 +1440,26 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    * false if file does not exist or is a directory
    * @see ClientProtocol#setReplication(String, short)
    */
-  boolean setReplication(final String src1, final short replication)
+  boolean setReplication(final String src, final short replication)
       throws IOException {
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src1);
-    final String src = dir.resolvePath(src1, pathComponents, dir);
-    HopsTransactionalRequestHandler setReplicationHandler =
-        new HopsTransactionalRequestHandler(HDFSOperationType.SET_REPLICATION,
-            src) {
-          @Override
-          public void acquireLock(TransactionLocks locks) throws IOException {
-            LockFactory lf = getInstance();
-            INodeLock il = lf.getINodeLock( INodeLockType.WRITE_ON_TARGET_AND_PARENT, INodeResolveType.PATH, src)
-                    .setNameNodeID(nameNode.getId())
-                    .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes())
-                    .skipReadingQuotaAttr(!dir.isQuotaEnabled());
-            locks.add(il).add(lf.getBlockLock())
-                    .add(lf.getBlockRelated(BLK.RE, BLK.ER, BLK.CR, BLK.UC, BLK.UR, BLK.IV)).add(lf.getAcesLock());
-          }
-
-          @Override
-          public Object performTask() throws IOException {
-            try {
-              return setReplicationInt(src, replication);
-            } catch (AccessControlException e) {
-              logAuditEvent(false, "setReplication", src);
-              throw e;
-            }
-          }
-        };
-    return (Boolean) setReplicationHandler.handle(this);
-  }
-
-  private boolean setReplicationInt(final String src, final short replication)
-      throws IOException {
-    blockManager.verifyReplication(src, replication, null);
-    final boolean isFile;
-    FSPermissionChecker pc = getPermissionChecker();
-    checkNameNodeSafeMode("Cannot set replication for " + src);
-    if (isPermissionEnabled) {
-      checkPathAccess(pc, src, FsAction.WRITE);
+    boolean success = false;
+    try {
+      checkNameNodeSafeMode("Cannot set replication for " + src);
+      success = FSDirAttrOp.setReplication(dir, blockManager, src, replication);
+    } catch (AccessControlException e) {
+      logAuditEvent(false, "setReplication", src);
+      throw e;
     }
-
-    INode targetNode = getINode(src);
-
-    final short[] oldReplication = new short[1];
-    final Block[] blocks = dir.setReplication(src, replication, oldReplication);
-    isFile = blocks != null;
-    // [s] for the files stored in the database setting the replication level does not make
-    // any sense. For now we will just set the replication level as requested by the user
-    if (isFile && !((INodeFile) targetNode).isFileStoredInDB()) {
-      blockManager.setReplication(oldReplication[0], replication, src, blocks);
-    }
-
-    if (isFile) {
+    if (success) {
       logAuditEvent(true, "setReplication", src);
     }
-    return isFile;
+    return success;
   }
 
-  void setMetaEnabled(final String src, final boolean metaEnabled)
+  void setMetaEnabled(final String srcArg, final boolean metaEnabled)
       throws IOException {
+    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(srcArg);
+    final String src = dir.resolvePath(srcArg, pathComponents, dir);
     INodeIdentifier stoRootINode = null;
     try {
       //we just want to lock the subtree, the access check is done in the perform task.
@@ -1862,7 +1484,8 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
         public Object performTask() throws IOException {
           try {
             FSPermissionChecker pc = getPermissionChecker();
-            checkPathAccess(pc, src, FsAction.WRITE);
+            final INodesInPath iip = dir.getINodesInPath4Write(src);
+            dir.checkPathAccess(pc, iip, FsAction.WRITE);
             if(metaEnabled) {
               logMetadataEvents(fileTree, MetadataLogEntry.Operation.ADD);
             }
@@ -1894,11 +1517,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   
   private void setMetaEnabledInt(final String src, final boolean metaEnabled)
       throws IOException {
-    FSPermissionChecker pc = getPermissionChecker();
     checkNameNodeSafeMode("Cannot set metaEnabled for " + src);
-    if (isPermissionEnabled) {
-      checkPathAccess(pc, src, FsAction.WRITE);
-    }
 
     INode targetNode = getINode(src);
     if (!targetNode.isDirectory()) {
@@ -1933,57 +1552,18 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    * @param src file/directory path
    * @param policyName storage policy name
    */
-  void setStoragePolicy(String src, final String policyName)
-      throws IOException {
+  void setStoragePolicy(String src, String policyName) throws IOException {
+    HdfsFileStatus auditStat;
     try {
-      setStoragePolicyInt(src, policyName);
+      checkNameNodeSafeMode("Cannot set storage policy for " + src);
+      auditStat = FSDirAttrOp.setStoragePolicy(
+          dir, blockManager, src, policyName);
     } catch (AccessControlException e) {
       logAuditEvent(false, "setStoragePolicy", src);
       throw e;
     }
+    logAuditEvent(true, "setStoragePolicy", src, null, auditStat);
   }
-
-  private void setStoragePolicyInt(final String filename, final String policyName)
-      throws IOException, UnresolvedLinkException, AccessControlException {
-
-    if (!isStoragePolicyEnabled) {
-      throw new IOException("Failed to set storage policy since "
-          + DFSConfigKeys.DFS_STORAGE_POLICY_ENABLED_KEY + " is set to false.");
-    }
-
-    final BlockStoragePolicy policy =  blockManager.getStoragePolicy(policyName);
-    if (policy == null) {
-      throw new HadoopIllegalArgumentException("Cannot find a block policy with the name " + policyName);
-    }
-
-    HopsTransactionalRequestHandler setStoragePolicyHandler =
-        new HopsTransactionalRequestHandler(HDFSOperationType.SET_STORAGE_POLICY, filename) {
-          @Override
-          public void acquireLock(TransactionLocks locks) throws IOException {
-            LockFactory lf = LockFactory.getInstance();
-            INodeLock il = lf.getINodeLock(INodeLockType.WRITE, INodeResolveType.PATH, filename)
-                    .setNameNodeID(nameNode.getId())
-                    .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes());
-            locks.add(il);
-          }
-
-          @Override
-          public Object performTask() throws IOException {
-            FSPermissionChecker pc = getPermissionChecker();
-            checkNameNodeSafeMode("Cannot set metaEnabled for " + filename);
-            if (isPermissionEnabled) {
-              checkPathAccess(pc, filename, FsAction.WRITE);
-            }
-
-            dir.setStoragePolicy(filename, policy);
-
-            return null;
-          }
-        };
-
-    setStoragePolicyHandler.handle();
-  }
-
 
   BlockStoragePolicy getDefaultStoragePolicy() throws IOException {
     return blockManager.getDefaultStoragePolicy();
@@ -1998,53 +1578,11 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    * @return All the existing block storage policies
    */
   BlockStoragePolicy[] getStoragePolicies() throws IOException {
-    return blockManager.getStoragePolicies();
+    return FSDirAttrOp.getStoragePolicies(blockManager);
   }
 
-  long getPreferredBlockSize(final String filename1) throws IOException {
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(filename1);
-    final String filename = dir.resolvePath(filename1, pathComponents, dir);
-    HopsTransactionalRequestHandler getPreferredBlockSizeHandler =
-        new HopsTransactionalRequestHandler(
-            HDFSOperationType.GET_PREFERRED_BLOCK_SIZE, filename) {
-          @Override
-          public void acquireLock(TransactionLocks locks) throws IOException {
-            LockFactory lf = LockFactory.getInstance();
-            INodeLock il =lf.getINodeLock(INodeLockType.READ_COMMITTED, INodeResolveType.PATH, filename)
-                    .setNameNodeID(nameNode.getId())
-                    .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes());
-            locks.add(il);
-          }
-
-          @Override
-          public Object performTask() throws IOException {
-            FSPermissionChecker pc = getPermissionChecker();
-            if (isPermissionEnabled) {
-              checkTraverse(pc, filename);
-            }
-            return dir.getPreferredBlockSize(filename);
-          }
-        };
-    return (Long) getPreferredBlockSizeHandler.handle(this);
-  }
-
-  /*
-   * Verify that parent directory of src exists.
-   */
-  private void verifyParentDir(String src)
-      throws FileNotFoundException, ParentNotDirectoryException,
-      UnresolvedLinkException, StorageException, TransactionContextException {
-    Path parent = new Path(src).getParent();
-    if (parent != null) {
-      INode parentNode = getINode(parent.toString());
-      if (parentNode == null) {
-        throw new FileNotFoundException(
-            "Parent directory doesn't exist: " + parent.toString());
-      } else if (!parentNode.isDirectory() && !parentNode.isSymlink()) {
-        throw new ParentNotDirectoryException(
-            "Parent path is not a directory: " + parent.toString());
-      }
-    }
+  long getPreferredBlockSize(String src) throws IOException {
+    return FSDirAttrOp.getPreferredBlockSize(dir, src);
   }
 
   /**
@@ -2146,7 +1684,8 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     boolean create = flag.contains(CreateFlag.CREATE);
     boolean overwrite = flag.contains(CreateFlag.OVERWRITE);
     
-    startFileInternal(pc, src, permissions, holder, clientMachine, create, overwrite,
+    final INodesInPath iip = dir.getINodesInPath4Write(src);
+    startFileInternal(pc, iip, permissions, holder, clientMachine, create, overwrite,
         createParent, replication, blockSize);
     final HdfsFileStatus stat = FSDirStatAndListingOp.getFileInfo(dir, src, false, true);
     logAuditEvent(true, "create", src, null,
@@ -2163,30 +1702,37 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    * For description of parameters and exceptions thrown see
    * {@link ClientProtocol#create}
    */
-  private void startFileInternal(FSPermissionChecker pc, String src,
+  private void startFileInternal(FSPermissionChecker pc, INodesInPath iip,
       PermissionStatus permissions, String holder, String clientMachine,
       boolean create, boolean overwrite, boolean createParent, short replication,
       long blockSize) throws
       IOException {
 
     // Verify that the destination does not exist as a directory already.
-    final INodesInPath iip = dir.getINodesInPath4Write(src);
     final INode inode = iip.getLastINode();
+    final String src = iip.getPath();
     if (inode != null && inode.isDirectory()) {
       throw new FileAlreadyExistsException(src +
           " already exists as a directory");
     }
-    final INodeFile myFile = INodeFile.valueOf(inode, src,  true);
+    
+    final INodeFile myFile = INodeFile.valueOf(inode, src, true);
     if (isPermissionEnabled) {
       if (overwrite && myFile != null) {
-        checkPathAccess(pc, src, FsAction.WRITE);
-      } else {
-        checkAncestorAccess(pc, src, FsAction.WRITE);
+        dir.checkPathAccess(pc, iip, FsAction.WRITE);
       }
+      /*
+       * To overwrite existing file, need to check 'w' permission 
+       * of parent (equals to ancestor in this case)
+       */
+      dir.checkAncestorAccess(pc, iip, FsAction.WRITE);
+    }
+    if (!createParent) {
+      dir.verifyParentDir(iip, src);
     }
 
     if (!createParent) {
-      verifyParentDir(src);
+      dir.verifyParentDir(iip, src);
     }
 
     try {
@@ -2199,14 +1745,15 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       } else {
         if (overwrite) {
           try {
-            deleteInt(src, true); // File exists - delete if overwrite
+            deleteInt(iip, true); // File exists - delete if overwrite
+            iip = INodesInPath.replace(iip, iip.length() - 1, null);
           } catch (AccessControlException e) {
             logAuditEvent(false, "delete", src);
             throw e;
           }
         } else {
           // If lease soft limit time is expired, recover the lease
-          recoverLeaseInternal(myFile, src, holder, clientMachine, false);
+          recoverLeaseInternal(iip, src, holder, clientMachine, false);
           throw new FileAlreadyExistsException(src + " for client " +
               clientMachine + " already exists");
         }
@@ -2216,11 +1763,12 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       
       INodeFile newNode = null;
       // Always do an implicit mkdirs for parent directory tree.
-      Path parent = new Path(src).getParent();
-      if (parent != null && mkdirsRecursively(parent.toString(),
-              permissions, true, now())) {
-        newNode = dir.addFile(src, permissions, replication, blockSize,
-                holder, clientMachine);
+      Map.Entry<INodesInPath, String> parent = FSDirMkdirOp
+          .createAncestorDirectories(dir, iip, permissions);
+      if (parent != null) {
+        iip = dir.addFile(parent.getKey(), parent.getValue(), permissions,
+            replication, blockSize, holder, clientMachine);
+        newNode = iip != null ? iip.getLastINode().asFile() : null;
       }
       
       if (newNode == null) {
@@ -2256,17 +1804,17 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    *
    * @return the last block locations if the block is partial or null otherwise
    */
-  private LocatedBlock appendFileInternal(FSPermissionChecker pc, String src,
+  private LocatedBlock appendFileInternal(FSPermissionChecker pc, INodesInPath iip,
       String holder, String clientMachine) throws AccessControlException,
       UnresolvedLinkException, FileNotFoundException, IOException {
-    final INodesInPath iip = dir.getINodesInPath4Write(src);
     final INode inode = iip.getLastINode();
+    final String src = iip.getPath();
     if (inode != null && inode.isDirectory()) {
       throw new FileAlreadyExistsException("Cannot append to directory " + src
           + "; already exists as a directory.");
     }
     if (isPermissionEnabled) {
-      checkPathAccess(pc, src, FsAction.WRITE);
+      dir.checkPathAccess(pc, iip, FsAction.WRITE);
     }
 
     try {
@@ -2277,12 +1825,8 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       INodeFile myFile = INodeFile.valueOf(inode, src, true);
 
       // Opening an existing file for write - may need to recover lease.
-      recoverLeaseInternal(myFile, src, holder, clientMachine, false);
+      recoverLeaseInternal(iip, src, holder, clientMachine, false);
 
-      // recoverLeaseInternal may create a new InodeFile via 
-      // finalizeINodeFileUnderConstruction so we need to refresh 
-      // the referenced file.  
-      myFile = INodeFile.valueOf(dir.getINode(src), src, true);
       final BlockInfo lastBlock = myFile.getLastBlock();
       // Check that the block has at least minimum replication.
       if (lastBlock != null && lastBlock.isComplete() && !getBlockManager().isSufficientlyReplicated(lastBlock)) {
@@ -2290,7 +1834,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
             + " is not sufficiently replicated yet.");
       }
       
-      return prepareFileForWrite(src, myFile, holder, clientMachine);
+      return prepareFileForWrite(src, iip, holder, clientMachine);
     } catch (IOException ie) {
       NameNode.stateChangeLog.warn("DIR* NameSystem.append: " +ie.getMessage());
       throw ie;
@@ -2298,13 +1842,11 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    }
 
   /**
-   * Replace current node with a INodeUnderConstruction.
+   * Convert current node to under construction.
    * Recreate lease record.
    *
    * @param src
    *     path to the file
-   * @param file
-   *     existing file object
    * @param leaseHolder
    *     identifier of the lease holder on this file
    * @param clientMachine
@@ -2313,23 +1855,23 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    * @throws UnresolvedLinkException
    * @throws IOException
    */
-  private LocatedBlock prepareFileForWrite(String src, INodeFile file,
+  private LocatedBlock prepareFileForWrite(String src, INodesInPath iip,
       String leaseHolder, String clientMachine)
       throws IOException {
-    INodeFile cons =
-        file.toUnderConstruction(leaseHolder, clientMachine);
-    Lease lease = leaseManager.addLease(cons.getFileUnderConstructionFeature()
+    final INodeFile file = iip.getLastINode().asFile();
+    file.toUnderConstruction(leaseHolder, clientMachine);
+    Lease lease = leaseManager.addLease(file.getFileUnderConstructionFeature()
         .getClientName(), src);
-    if(cons.isFileStoredInDB()){
+    if(file.isFileStoredInDB()){
       LOG.debug("Stuffed Inode:  prepareFileForWrite stored in database. " +
           "Returning phantom block");
-      return blockManager.createPhantomLocatedBlocks(cons,cons.getFileDataInDB(),true,false).getLocatedBlocks().get(0);
+      return blockManager.createPhantomLocatedBlocks(file,file.getFileDataInDB(),true,false).getLocatedBlocks().get(0);
     } else {
-      LocatedBlock ret = blockManager.convertLastBlockToUnderConstruction(cons);
+      LocatedBlock ret = blockManager.convertLastBlockToUnderConstruction(file);
       if (ret != null && dir.isQuotaEnabled()) {
         // update the quota: use the preferred block size for UC block
         final long diff = file.getPreferredBlockSize() - ret.getBlockSize();
-        dir.updateSpaceConsumed(src, 0, diff * file.getFileReplication());
+        dir.updateSpaceConsumed(iip, 0, diff * file.getBlockReplication());
       }
       lease.updateLastTwoBlocksInLeasePath(src, file.getLastBlock(), file.getPenultimateBlock());
       return ret;
@@ -2345,7 +1887,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    * recovery so that the file can be forced to be closed.
    *
    * @param src1
-   *     the path of the file to start lease recovery
+   *     the srcArg of the file to start lease recovery
    * @param holder
    *     the lease holder's name
    * @param clientMachine
@@ -2353,10 +1895,10 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    * @return true if the file is already closed
    * @throws IOException
    */
-  boolean recoverLease(final String src1, final String holder,
+  boolean recoverLease(final String srcArg, final String holder,
       final String clientMachine) throws IOException {
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src1);
-    final String src = dir.resolvePath(src1, pathComponents, dir);
+    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(srcArg);
+    final String src = dir.resolvePath(srcArg, pathComponents, dir);
     HopsTransactionalRequestHandler recoverLeaseHandler =
         new HopsTransactionalRequestHandler(HDFSOperationType.RECOVER_LEASE,
             src) {
@@ -2383,15 +1925,16 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
               throw new IOException("Invalid file name: " + src);
             }
 
-            final INodeFile inode = INodeFile.valueOf(dir.getINode(src), src);
+            final INodesInPath iip = dir.getINodesInPath4Write(src);
+            final INodeFile inode = INodeFile.valueOf(iip.getLastINode(), src);
             if (!inode.isUnderConstruction()) {
               return true;
             }
             if (isPermissionEnabled) {
-              checkPathAccess(pc, src, FsAction.WRITE);
+              dir.checkPathAccess(pc, iip, FsAction.WRITE);
             }
 
-            recoverLeaseInternal(inode, src, holder, clientMachine, true);
+            recoverLeaseInternal(iip, src, holder, clientMachine, true);
             return false;
           }
         };
@@ -2399,10 +1942,11 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     return (Boolean) recoverLeaseHandler.handle(this);
   }
 
-  private void recoverLeaseInternal(INodeFile fileInode, String src, String holder,
+  private void recoverLeaseInternal(INodesInPath iip, String src, String holder,
       String clientMachine, boolean force)
       throws IOException {
-    if (fileInode != null && fileInode.isUnderConstruction()) {
+    INodeFile file = iip.getLastINode().asFile();
+    if (file != null && file.isUnderConstruction()) {
       //
       // If the file is under construction , then it must be in our
       // leases. Find the appropriate lease record.
@@ -2424,7 +1968,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       //
       // Find the original holder.
       //
-      FileUnderConstructionFeature uc = fileInode.getFileUnderConstructionFeature();
+      FileUnderConstructionFeature uc = file.getFileUnderConstructionFeature();
       String clientName = uc.getClientName();
       lease = leaseManager.getLease(clientName);
       if (lease == null) {
@@ -2438,7 +1982,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
         // close only the file src
         LOG.info("recoverLease: " + lease + ", src=" + src +
             " from client " + clientName);
-        internalReleaseLease(lease, src, holder);
+        internalReleaseLease(lease, src, iip, holder);
       } else {
         assert lease.getHolder().equals(clientName) :
             "Current lease holder " + lease.getHolder() +
@@ -2450,14 +1994,14 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
         if (leaseManager.expiredSoftLimit(lease)) {
           LOG.info("startFile: recover " + lease + ", src=" + src + " client " +
               clientName);
-          boolean isClosed = internalReleaseLease(lease, src, null);
+          boolean isClosed = internalReleaseLease(lease, src, iip, null);
           if (!isClosed) {
             throw new RecoveryInProgressException.NonAbortingRecoveryInProgressException(
                 "Failed to close file " + src +
                     ". Lease recovery is in progress. Try again later.");
           }
         } else {
-          final BlockInfo lastBlock = fileInode.getLastBlock();
+          final BlockInfo lastBlock = file.getLastBlock();
           if (lastBlock != null &&
               lastBlock.getBlockUCState() == BlockUCState.UNDER_RECOVERY) {
             throw new RecoveryInProgressException(
@@ -2655,7 +2199,8 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     LocatedBlock lb;
     HdfsFileStatus stat = null;
     FSPermissionChecker pc = getPermissionChecker();
-    lb = appendFileInternal(pc, src, holder, clientMachine);
+    final INodesInPath iip = dir.getINodesInPath4Write(src);
+    lb = appendFileInternal(pc, iip, holder, clientMachine);
     stat = FSDirStatAndListingOp.getFileInfo(dir, src, false, true);
     if (lb != null) {
       if (NameNode.stateChangeLog.isDebugEnabled()) {
@@ -2751,7 +2296,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
             clientNode = blockManager.getDatanodeManager().getDatanodeByHost(
               clientMachine);
 
-            replication = pendingFile.getFileReplication();
+            replication = pendingFile.getBlockReplication();
 
             // Get the storagePolicyID of this file
             byte storagePolicyID = pendingFile.getStoragePolicyID();
@@ -2788,7 +2333,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
             }
 
             // commit the last block and complete it if it has minimum replicas
-            commitOrCompleteLastBlock(pendingFile,
+            commitOrCompleteLastBlock(pendingFile, fileState.iip,
                 ExtendedBlock.getLocalBlock(previous));
 
             // allocate new block, record block locations in INode.
@@ -2847,10 +2392,12 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   static class FileState {
     public final INodeFile inode;
     public final String path;
+    public final INodesInPath iip;
   
-    public FileState(INodeFile inode, String fullPath) {
+    public FileState(INodeFile inode, String fullPath, INodesInPath iip) {
       this.inode = inode;
       this.path = fullPath;
+      this.iip = iip;
     }
   }
 
@@ -2866,18 +2413,22 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     checkFsObjectLimit();
 
     Block previousBlock = ExtendedBlock.getLocalBlock(previous);
-    INode inode;
+        final INode inode;
+    final INodesInPath iip;
     if (fileId == INode.ROOT_PARENT_ID) {
       // Older clients may not have given us an inode ID to work with.
       // In this case, we have to try to resolve the path and hope it
       // hasn't changed or been deleted since the file was opened for write.
-      final INodesInPath iip = dir.getINodesInPath4Write(src);
+      iip = dir.getINodesInPath4Write(src);
       inode = iip.getLastINode();
     } else {
       // Newer clients pass the inode ID, so we can just get the inode
       // directly.
       inode = EntityManager.find(INode.Finder.ByINodeIdFTIS, fileId);
-      if (inode != null) src = inode.getFullPathName();
+      iip = INodesInPath.fromINode(inode);
+      if (inode != null) {
+        src = iip.getPath();
+      }
     }
     final INodeFile pendingFile = checkLease(src, clientName, inode, fileId, true);
     BlockInfo lastBlockInFile = pendingFile.getLastBlock();
@@ -2939,7 +2490,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
             ((BlockInfoUnderConstruction) lastBlockInFile).getExpectedStorageLocations(
                 getBlockManager().getDatanodeManager()),
             offset);
-        return new FileState(pendingFile, src);
+        return new FileState(pendingFile, src, iip);
       } else {
         // Case 3
         throw new IOException("Cannot allocate block in " + src + ": " +
@@ -2953,7 +2504,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       throw new NotReplicatedYetException("Not replicated yet: " + src +
               " block " + pendingFile.getPenultimateBlock());
     }
-    return new FileState(pendingFile, src);
+    return new FileState(pendingFile, src, iip);
   }
 
   private LocatedBlock makeLocatedBlock(Block blk, DatanodeStorageInfo[] locs, long offset)
@@ -3058,10 +2609,10 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   /**
    * The client would like to let go of the given block
    */
-  boolean abandonBlock(final ExtendedBlock b, final long fileId, final String src1,
+  boolean abandonBlock(final ExtendedBlock b, final long fileId, final String srcArg,
       final String holder) throws IOException {
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src1);
-    final String src = dir.resolvePath(src1, pathComponents, dir);
+    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(srcArg);
+    final String src = dir.resolvePath(srcArg, pathComponents, dir);
     HopsTransactionalRequestHandler abandonBlockHandler =
         new HopsTransactionalRequestHandler(HDFSOperationType.ABANDON_BLOCK,
             src) {
@@ -3101,26 +2652,29 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
                   "BLOCK* NameSystem.abandonBlock: " + b + "of file " + src);
             }
             checkNameNodeSafeMode("Cannot abandon block " + b + " for file" + src);
-            String src2 = src;
+            String srcInt = src;
             final INode inode;
+            final INodesInPath iip;
             if (fileId == INode.ROOT_PARENT_ID) {
               // Older clients may not have given us an inode ID to work with.
               // In this case, we have to try to resolve the path and hope it
               // hasn't changed or been deleted since the file was opened for write.
-              inode = dir.getINode(src);
+              iip = dir.getINodesInPath(srcInt, true);
+              inode = iip.getLastINode();
             } else {
               inode = EntityManager.find(INode.Finder.ByINodeIdFTIS, fileId);
+              iip = INodesInPath.fromINode(inode);
               if (inode != null) {
-                src2 = inode.getFullPathName();
+                srcInt = iip.getPath();
               }
             }
-            final INodeFile file = checkLease(src2, holder, inode, fileId, false);
+            final INodeFile file = checkLease(srcInt, holder, inode, fileId, false);
 
-            boolean removed = dir.removeBlock(src2, file, ExtendedBlock.getLocalBlock(b));
+            boolean removed = dir.removeBlock(srcInt, iip, file, ExtendedBlock.getLocalBlock(b));
             if (!removed) {
               return true;
             }
-            leaseManager.getLease(holder).updateLastTwoBlocksInLeasePath(src2,
+            leaseManager.getLease(holder).updateLastTwoBlocksInLeasePath(srcInt,
                 file.getLastBlock(), file.getPenultimateBlock());
 
             if (NameNode.stateChangeLog.isDebugEnabled()) {
@@ -3128,7 +2682,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
                   "BLOCK* NameSystem.abandonBlock: " + b +
                       " is removed from pendingCreates");
             }
-            persistBlocks(src2, file);
+            persistBlocks(srcInt, file);
             file.recomputeFileSize();
 
             return true;
@@ -3254,25 +2808,26 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       Block last, long fileId)
       throws IOException {
     INodeFile pendingFile;
+    final INodesInPath iip;
+    INode inode = null;
     try {
-      final INode inode;
       if (fileId == INode.ROOT_PARENT_ID) {
         // Older clients may not have given us an inode ID to work with.
         // In this case, we have to try to resolve the path and hope it
         // hasn't changed or been deleted since the file was opened for write.
-        final INodesInPath iip = dir.getLastINodeInPath(src);
-        inode = iip.getINode(0);
+        iip = dir.getINodesInPath(src, true);
+        inode = iip.getLastINode();
       } else {
         inode = EntityManager.find(INode.Finder.ByINodeIdFTIS, fileId);
+        iip = INodesInPath.fromINode(inode);
         if (inode != null) {
-          src = inode.getFullPathName();
+          src = iip.getPath();
         }
       }
       pendingFile = checkLease(src, holder, inode, fileId, true);
     } catch (LeaseExpiredException lee) {
-      final INode inode = dir.getINode(src);
-      if (inode != null && inode instanceof INodeFile &&
-          !inode.isUnderConstruction()) {
+      if (inode != null && inode.isFile() && 
+          !inode.asFile().isUnderConstruction()) {
         // This could be a retry RPC - i.e the client tried to close
         // the file, but missed the RPC response. Thus, it is trying
         // again to close the file. If the file still exists and
@@ -3297,7 +2852,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     }
 
     // commit the last block and complete it if it has minimum replicas
-    commitOrCompleteLastBlock(pendingFile, last);
+    commitOrCompleteLastBlock(pendingFile, iip, last);
 
     if (!checkFileProgress(src, pendingFile, true)) {
       return false;
@@ -3315,19 +2870,22 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       final byte[] data)
       throws IOException {
     INodeFile pendingFile;
-    final INode inode;
-        if (fileId == INode.ROOT_PARENT_ID) {
-          // Older clients may not have given us an inode ID to work with.
-          // In this case, we have to try to resolve the path and hope it
-          // hasn't changed or been deleted since the file was opened for write.
-          inode = dir.getINode(src);
-        } else {
-          inode = EntityManager.find(INode.Finder.ByINodeIdFTIS, fileId);
-          if (inode != null) {
-            src = inode.getFullPathName();
-          }
-        }
-        
+    final INodesInPath iip;
+    INode inode = null;
+    if (fileId == INode.ROOT_PARENT_ID) {
+      // Older clients may not have given us an inode ID to work with.
+      // In this case, we have to try to resolve the path and hope it
+      // hasn't changed or been deleted since the file was opened for write.
+      iip = dir.getINodesInPath(src, true);
+      inode = iip.getLastINode();
+    } else {
+      inode = EntityManager.find(INode.Finder.ByINodeIdFTIS, fileId);
+      iip = INodesInPath.fromINode(inode);
+      if (inode != null) {
+        src = iip.getPath();
+      }
+    }
+
     pendingFile = checkLease(src, holder, inode, fileId, true);
 
     //in case of appending to small files. we might have to migrate the file from
@@ -3348,8 +2906,8 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     if (dir.isQuotaEnabled()) {
       //account for only newly added data
       long spaceConsumed = (data.length - oldSize) * pendingFile
-          .getFileReplication();
-      dir.updateSpaceConsumed(src, 0, spaceConsumed);
+          .getBlockReplication();
+      dir.updateSpaceConsumed(iip, 0, spaceConsumed);
     }
 
 
@@ -3449,6 +3007,48 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   // are made, edit namespace and return to client.
   ////////////////////////////////////////////////////////////////
 
+  /** 
+   * Change the indicated filename. 
+   * @deprecated Use {@link #renameTo(String, String, Options.Rename...)} instead.
+   */
+  @Deprecated
+  boolean renameTo(String src, String dst)
+      throws IOException {
+    //only for testing
+    saveTimes();
+    boolean ret = false;
+    try {
+      checkNameNodeSafeMode("Cannot rename " + src);
+      ret = FSDirRenameOp.renameToInt(dir, src, dst);
+    } catch (AccessControlException e)  {
+      logAuditEvent(false, "rename", src, dst, null);
+      throw e;
+    }
+
+    return ret;
+  }
+
+  void renameTo(final String src, final String dst,
+                Options.Rename... options)
+      throws IOException {
+    //only for testing
+    saveTimes();
+    Map.Entry<BlocksMapUpdateInfo, HdfsFileStatus> res = null;
+    try {
+      checkNameNodeSafeMode("Cannot rename " + src);
+      res = FSDirRenameOp.renameToInt(dir, src, dst, options);
+    } catch (AccessControlException e) {
+      logAuditEvent(false, "rename (options=" + Arrays.toString(options) +
+          ")", src, dst, null);
+      throw e;
+    }
+
+    HdfsFileStatus auditStat = res.getValue();
+
+    logAuditEvent(true, "rename (options=" + Arrays.toString(options) +
+        ")", src, dst, auditStat);
+  }
+
   /**
    * Remove the indicated file from namespace.
    *
@@ -3496,7 +3096,8 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
             }
             boolean ret = false;
             try {
-              ret = delete(src, recursive);
+              final INodesInPath iip = dir.getINodesInPath4Write(src);
+              ret = delete(iip, recursive);
               return ret;
             } finally {
               RetryCacheDistributed.setState(cacheEntry, ret);
@@ -3506,26 +3107,26 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     return (Boolean) deleteHandler.handle(this);
   }
 
-  private boolean delete(String src, boolean recursive)
+  private boolean delete(INodesInPath iip, boolean recursive)
       throws
       IOException {
     try {
-      return deleteInt(src, recursive);
+      return deleteInt(iip, recursive);
     } catch (AccessControlException e) {
-      logAuditEvent(false, "delete", src);
+      logAuditEvent(false, "delete", iip.getPath());
       throw e;
     }
   }
 
-  private boolean deleteInt(String src, boolean recursive)
+  private boolean deleteInt(INodesInPath iip, boolean recursive)
       throws
       IOException {
     if (NameNode.stateChangeLog.isDebugEnabled()) {
-      NameNode.stateChangeLog.debug("DIR* NameSystem.delete: " + src);
+      NameNode.stateChangeLog.debug("DIR* NameSystem.delete: " + iip.getPath());
     }
-    boolean status = deleteInternal(src, recursive, true);
+    boolean status = deleteInternal(iip, recursive, true);
     if (status) {
-      logAuditEvent(true, "delete", src);
+      logAuditEvent(true, "delete", iip.getPath());
     }
     return status;
   }
@@ -3545,33 +3146,33 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    *
    * @see ClientProtocol#delete(String, boolean) for description of exceptions
    */
-  private boolean deleteInternal(String src, boolean recursive,
+  private boolean deleteInternal(INodesInPath iip, boolean recursive,
       boolean enforcePermission)
       throws
       IOException {
     BlocksMapUpdateInfo collectedBlocks = new BlocksMapUpdateInfo();
     FSPermissionChecker pc = getPermissionChecker();
-    checkNameNodeSafeMode("Cannot delete " + src);
-    if (!recursive && dir.isNonEmptyDirectory(src)) {
-       throw new PathIsNotEmptyDirectoryException(src + " is non empty");
+    checkNameNodeSafeMode("Cannot delete " + iip.getPath());
+    if (!recursive && dir.isNonEmptyDirectory(iip)) {
+       throw new PathIsNotEmptyDirectoryException(iip.getPath() + " is non empty");
     }
     if (enforcePermission && isPermissionEnabled) {
-      checkPermission(pc, src, false, null, FsAction.WRITE, null, FsAction.ALL, true, false);
+      dir.checkPermission(pc, iip, false, null, FsAction.WRITE, null, FsAction.ALL, true);
     }
     long mtime = now();
     // Unlink the target directory from directory tree
-    long filesRemoved = dir.delete(src, collectedBlocks,mtime);
+    long filesRemoved = dir.delete(iip, collectedBlocks,mtime);
     if (filesRemoved < 0) {      
       return false;
     }
     incrDeletedFileCount(filesRemoved);
     // Blocks/INodes will be handled later
-    removePathAndBlocks(src, null);
+    removePathAndBlocks(iip.getPath(), null);
     removeBlocks(collectedBlocks); // Incremental deletion of blocks
     collectedBlocks.clear();
     if (NameNode.stateChangeLog.isDebugEnabled()) {
       NameNode.stateChangeLog
-          .debug("DIR* Namesystem.delete: " + src + " is removed");
+          .debug("DIR* Namesystem.delete: " + iip.getPath() + " is removed");
     }
     return true;
   }
@@ -3677,179 +3278,17 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   /**
    * Create all the necessary directories
    */
-  boolean mkdirs(final String src1, final PermissionStatus permissions,
-      final boolean createParent) throws IOException {
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src1);
-    final String src = dir.resolvePath(src1, pathComponents, dir);
-    final boolean resolvedLink = false;
-    HopsTransactionalRequestHandler mkdirsHandler =
-        new HopsTransactionalRequestHandler(HDFSOperationType.MKDIRS, src) {
-          @Override
-          public void acquireLock(TransactionLocks locks) throws IOException {
-            LockFactory lf = getInstance();
-            INodeLock il = lf.getINodeLock( INodeLockType.WRITE_ON_TARGET_AND_PARENT, INodeResolveType.PATH, src)
-                    .resolveSymLink(resolvedLink)
-                    .setNameNodeID(nameNode.getId())
-                    .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes())
-                    .skipReadingQuotaAttr(!dir.isQuotaEnabled());
-            locks.add(il);
-            locks.add(lf.getAcesLock());
-          }
-
-          @Override
-          public Object performTask() throws IOException {
-            try {
-              return mkdirsInt(src, permissions, createParent);
-            } catch (AccessControlException e) {
-              logAuditEvent(false, "mkdirs", src);
-              throw e;
-            }
-          }
-        };
-    return (Boolean) mkdirsHandler.handle(this);
-  }
-
-  private boolean mkdirsInt(String src, PermissionStatus permissions,
-      boolean createParent)
-      throws IOException {
-    HdfsFileStatus resultingStat = null;
-    boolean status = false;
-    if (NameNode.stateChangeLog.isDebugEnabled()) {
-      NameNode.stateChangeLog
-          .debug(this.getNamenodeId() + ") DIR* NameSystem.mkdirs: " + src);
+  boolean mkdirs(String src, PermissionStatus permissions,
+      boolean createParent) throws IOException {
+    HdfsFileStatus auditStat = null;
+    try {
+      checkNameNodeSafeMode("Cannot create directory " + src);
+      auditStat = FSDirMkdirOp.mkdirs(this, src, permissions, createParent);
+    } catch (AccessControlException e) {
+      logAuditEvent(false, "mkdirs", src);
+      throw e;
     }
-    FSPermissionChecker pc = getPermissionChecker();
-    status = mkdirsInternal(pc, src, permissions, createParent);
-    if (status) {
-      resultingStat = getAuditFileInfo(src, false);
-    }
-
-    if (status) {
-      logAuditEvent(true, "mkdirs", src, null, resultingStat);
-    }
-    return status;
-  }
-
-  /**
-   * Create all the necessary directories
-   */
-  private boolean mkdirsInternal(FSPermissionChecker pc, String src,
-      PermissionStatus permissions, boolean createParent)
-      throws IOException {
-    checkNameNodeSafeMode("Cannot create directory " + src);
-    if (isPermissionEnabled) {
-      checkTraverse(pc, src);
-    }
-    if (dir.isDir(src)) {
-      // all the users of mkdirs() are used to expect 'true' even if
-      // a new directory is not created.
-      return true;
-    }
-    if (!DFSUtil.isValidName(src)) {
-      throw new InvalidPathException(src);
-    }
-    if (isPermissionEnabled) {
-      checkAncestorAccess(pc, src, FsAction.WRITE);
-    }
-    if (!createParent) {
-      verifyParentDir(src);
-    }
-
-    // validate that we have enough inodes. This is, at best, a
-    // heuristic because the mkdirs() operation might need to
-    // create multiple inodes.
-    checkFsObjectLimit();
-
-    if (!mkdirsRecursively(src, permissions, false, now())) {
-      throw new IOException("Failed to create directory: " + src);
-    }
-    return true;
-  }
-
-    /**
-   * Create a directory
-   * If ancestor directories do not exist, automatically create them.
-   * @param src string representation of the path to the directory
-   * @param permissions the permission of the directory
-   * @param inheritPermission if the permission of the directory should inherit
-   *                          from its parent or not. u+wx is implicitly added to
-   *                          the automatically created directories, and to the
-   *                          given directory if inheritPermission is true
-   * @param now creation time
-   * @return true if the operation succeeds false otherwise
-   * @throws QuotaExceededException if directory creation violates
-   *                                any quota limit
-   * @throws UnresolvedLinkException if a symlink is encountered in src.
-   */
-  private boolean mkdirsRecursively(String src, PermissionStatus permissions,
-      boolean inheritPermission, long now)
-      throws FileAlreadyExistsException, QuotaExceededException,
-      UnresolvedLinkException, IOException,
-      AclException {
-    src = FSDirectory.normalizePath(src);
-    String[] names = INode.getPathNames(src);
-    byte[][] components = INode.getPathComponents(names);
-    final int lastInodeIndex = components.length - 1;
-    INodesInPath iip = dir.getExistingPathINodes(components);
-    INode[] inodes = iip.getINodes();
-    // find the index of the first null in inodes[]
-    StringBuilder pathbuilder = new StringBuilder();
-    int i = 1;
-    for (; i < inodes.length && inodes[i] != null; i++) {
-      pathbuilder.append(Path.SEPARATOR).append(names[i]);
-      if (!inodes[i].isDirectory()) {
-        throw new FileAlreadyExistsException(
-            "Parent path is not a directory: "
-            + pathbuilder + " " + inodes[i].getLocalName());
-      }
-    }
-    // default to creating parent dirs with the given perms
-    PermissionStatus parentPermissions = permissions;
-    // if not inheriting and it's the last inode, there's no use in
-    // computing perms that won't be used
-    if (inheritPermission || (i < lastInodeIndex)) {
-      // if inheriting (ie. creating a file or symlink), use the parent dir,
-      // else the supplied permissions
-      // NOTE: the permissions of the auto-created directories violate posix
-      FsPermission parentFsPerm = inheritPermission
-          ? inodes[i - 1].getFsPermission() : permissions.getPermission();
-      // ensure that the permissions allow user write+execute
-      if (!parentFsPerm.getUserAction().implies(FsAction.WRITE_EXECUTE)) {
-        parentFsPerm = new FsPermission(
-            parentFsPerm.getUserAction().or(FsAction.WRITE_EXECUTE),
-            parentFsPerm.getGroupAction(),
-            parentFsPerm.getOtherAction()
-        );
-      }
-      if (!parentPermissions.getPermission().equals(parentFsPerm)) {
-        parentPermissions = new PermissionStatus(
-            parentPermissions.getUserName(),
-            parentPermissions.getGroupName(),
-            parentFsPerm
-        );
-        // when inheriting, use same perms for entire path
-        if (inheritPermission) {
-          permissions = parentPermissions;
-        }
-      }
-    }
-    // create directories beginning from the first null index
-    for (; i < inodes.length; i++) {
-      pathbuilder.append(Path.SEPARATOR).append(names[i]);
-      dir.unprotectedMkdir(IDsGeneratorFactory.getInstance().getUniqueINodeID(), iip, i, components[i],
-          (i < lastInodeIndex) ? parentPermissions : permissions, now);
-      if (inodes[i] == null) {
-        return false;
-      }
-      // Directory creation also count towards FilesCreated
-      // to match count of FilesDeleted metric.
-      NameNode.getNameNodeMetrics().incrFilesCreated();
-      final String cur = pathbuilder.toString();
-      if (NameNode.stateChangeLog.isDebugEnabled()) {
-        NameNode.stateChangeLog.debug(
-            "mkdirs: created directory " + cur);
-      }
-    }
+    logAuditEvent(true, "mkdirs", src, null, auditStat);
     return true;
   }
 
@@ -3955,13 +3394,13 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    *     RecoveryInProgressException if lease recovery is in progress.<br>
    *     IOException in case of an error.
    */
-  boolean internalReleaseLease(Lease lease, String src,
+  boolean internalReleaseLease(Lease lease, String src, INodesInPath iip,
       String recoveryLeaseHolder)
       throws IOException {
     LOG.info("Recovering " + lease + ", src=" + src);
     assert !isInSafeMode();
 
-    final INodeFile pendingFile = INodeFile.valueOf(dir.getINode(src), src);
+    final INodeFile pendingFile = iip.getLastINode().asFile();
     int nrBlocks = pendingFile.numBlocks();
     BlockInfo[] blocks = pendingFile.getBlocks();
 
@@ -4087,7 +3526,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   }
 
   private void commitOrCompleteLastBlock(
-      final INodeFile fileINode, final Block commitBlock)
+      final INodeFile fileINode, final INodesInPath iip, final Block commitBlock)
       throws IOException {
     Preconditions.checkArgument(fileINode.isUnderConstruction());
     if (!blockManager.commitOrCompleteLastBlock(fileINode, commitBlock)) {
@@ -4101,9 +3540,8 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
           - commitBlock.getNumBytes();
       if (diff > 0) {
         // Adjust disk space consumption if required
-        String path = fileINode.getFullPathName();
-        dir.updateSpaceConsumed(path, 0,
-            -diff * fileINode.getFileReplication());
+        dir.updateSpaceConsumed(iip, 0,
+            -diff * fileINode.getBlockReplication());
       }
     }
   }
@@ -4128,12 +3566,12 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     leaseManager.removeLease(uc.getClientName(), src);
     
     // close file and persist block allocations for this file
-    INodeFile newFile = pendingFile.toCompleteFile(now());
-    closeFile(src, newFile);
+    pendingFile.toCompleteFile(now());
+    closeFile(src, pendingFile);
     newFile.logProvenanceEvent(ProvenanceLogEntry.Operation.append());
 
     if (!skipReplicationChecks) {
-      blockManager.checkReplication(newFile);
+      blockManager.checkReplication(pendingFile);
     }
   }
 
@@ -4310,10 +3748,11 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       BlockInfo storedBlock)
       throws IOException {
 
-    String src = pendingFile.getFullPathName();
+    final INodesInPath iip = INodesInPath.fromINode(pendingFile);
+    final String src = iip.getPath();
 
     // commit the last block and complete it if it has minimum replicas
-    commitOrCompleteLastBlock(pendingFile, storedBlock);
+    commitOrCompleteLastBlock(pendingFile, iip, storedBlock);
 
     //remove lease, close file
     finalizeINodeFileUnderConstruction(src, pendingFile);
@@ -4542,40 +3981,6 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
               +" blocks is persisted to the file system");
     }
     file.logMetadataEvent(MetadataLogEntry.Operation.ADD);
-  }
-
-  /**
-   * Add the given symbolic link to the fs. Record it in the edits log.
-   * @param path
-   * @param target
-   * @param dirPerms
-   * @param createParent
-   * @param dir
-   */
-  private INodeSymlink addSymlink(String path, String target,
-                                  PermissionStatus dirPerms,
-                                  boolean createParent)
-      throws UnresolvedLinkException, FileAlreadyExistsException,
-      QuotaExceededException, AclException, IOException {
-    final long modTime = now();
-    if (createParent) {
-      final String parent = new Path(path).getParent().toString();
-      if (!mkdirsRecursively(parent, dirPerms, true, modTime)) {
-        return null;
-      }
-    }
-    final String userName = dirPerms.getUserName();
-    long id = IDsGeneratorFactory.getInstance().getUniqueINodeID();
-    INodeSymlink newNode = dir.addSymlink(id, path, target, modTime, modTime,
-            new PermissionStatus(userName, null, FsPermission.getDefault()));
-    if (newNode == null) {
-      NameNode.stateChangeLog.info("addSymlink: failed to add " + path);
-      return null;
-    }
-    if(NameNode.stateChangeLog.isDebugEnabled()) {
-      NameNode.stateChangeLog.debug("addSymlink: " + path + " is added");
-    }
-    return newNode;
   }
   
   /**
@@ -5757,34 +5162,6 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
         permission);
   }
 
-  private void checkOwner(FSPermissionChecker pc, String path)
-      throws IOException {
-    dir.checkOwner(pc, path);
-  }
-
-  private void checkPathAccess(FSPermissionChecker pc, String path,
-      FsAction access)
-      throws IOException {
-    dir.checkPathAccess(pc, path, access);
-  }
-
-  private void checkParentAccess(FSPermissionChecker pc, String path,
-      FsAction access)
-      throws IOException {
-    dir.checkParentAccess(pc, path, access);
-  }
-
-  private void checkAncestorAccess(FSPermissionChecker pc, String path,
-      FsAction access)
-      throws IOException {
-    dir.checkAncestorAccess(pc, path, access);
-  }
-
-  private void checkTraverse(FSPermissionChecker pc, String path)
-      throws IOException {
-    dir.checkTraverse(pc, path);
-  }
-
   @Override
   public void checkSuperuserPrivilege() throws AccessControlException {
     if (isPermissionEnabled) {
@@ -5794,31 +5171,10 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   }
 
   /**
-   * Check whether current user have permissions to access the path. For more
-   * details of the parameters, see
-   * {@link FSPermissionChecker#checkPermission}.
-   */
-  private void checkPermission(FSPermissionChecker pc, String path,
-      boolean doCheckOwner, FsAction ancestorAccess, FsAction parentAccess,
-      FsAction access, FsAction subAccess)throws AccessControlException, UnresolvedLinkException, IOException{
-    checkPermission(pc, path, doCheckOwner, ancestorAccess,
-        parentAccess, access, subAccess, false, true);
-  }
-
-  private void checkPermission(FSPermissionChecker pc,
-      String path, boolean doCheckOwner, FsAction ancestorAccess,
-      FsAction parentAccess, FsAction access, FsAction subAccess, boolean ignoreEmptyDir, 
-      boolean resolveLink) throws AccessControlException, UnresolvedLinkException, TransactionContextException,
-      IOException {
-    dir.checkPermission(pc, path, doCheckOwner, ancestorAccess, parentAccess,
-        access, subAccess, ignoreEmptyDir, resolveLink);
-  }
-
-  /**
    * Check to see if we have exceeded the limit on the number
    * of inodes.
    */
-  private void checkFsObjectLimit() throws IOException {
+  void checkFsObjectLimit() throws IOException {
     if (maxFsObjects != 0 &&
         maxFsObjects <= dir.totalInodes() + getBlocksTotal()) {
       throw new IOException("Exceeded the configured number of objects " +
@@ -5994,7 +5350,28 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    */
   @Override // FSNamesystemMBean
   public int getNumStaleStorages() {
-      return getBlockManager().getDatanodeManager().getNumStaleStorages();
+    return getBlockManager().getDatanodeManager().getNumStaleStorages();
+  }
+
+  @Override // FSNamesystemMBean
+  public String getTopUserOpCounts() {
+    if (!topConf.isEnabled) {
+      return null;
+    }
+
+    Date now = new Date();
+    final List<RollingWindowManager.TopWindow> topWindows =
+        topMetrics.getTopWindows();
+    Map<String, Object> topMap = new TreeMap<String, Object>();
+    topMap.put("windows", topWindows);
+    topMap.put("timestamp", DFSUtil.dateToIso8601String(now));
+    ObjectMapper mapper = new ObjectMapper();
+    try {
+      return mapper.writeValueAsString(topMap);
+    } catch (IOException e) {
+      LOG.warn("Failed to fetch TopUser metrics", e);
+    }
+    return null;
   }
 
   private long nextBlockId() throws IOException{
@@ -6179,9 +5556,6 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     }.handle(this);
   }
 
-  /**
-   * @see #updatePipeline(String, ExtendedBlock, ExtendedBlock, DatanodeID[], String[])
-   */
   private void updatePipelineInternal(String clientName, ExtendedBlock oldBlock,
       ExtendedBlock newBlock, DatanodeID[] newNodes, String[] newStorageIDs)
       throws IOException, StorageException {
@@ -7084,361 +6458,153 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     }.handle();
   }
     
-  long addCacheDirective(final CacheDirectiveInfo directive, final EnumSet<CacheFlag> flags)
+  long addCacheDirective(CacheDirectiveInfo directive,
+                         EnumSet<CacheFlag> flags)
       throws IOException {
-    cacheManager.validatePoolName(directive);
-    final String path = cacheManager.validatePath(directive);
-    if (isInSafeMode()) {
-      throw new SafeModeException(
-          "Cannot add cache directive", safeMode());
-    }
-    if (directive.getId() != null) {
-      throw new IOException("addDirective: you cannot specify an ID " + "for this operation.");
-    }
-    if (!flags.contains(CacheFlag.FORCE)) {
-          cacheManager.waitForRescanIfNeeded();
-    }
-    final long id = cacheManager.getNextDirectiveId();
-    HopsTransactionalRequestHandler addDirectiveHandler = new HopsTransactionalRequestHandler(HDFSOperationType.ADD_CACHE_DIRECTIVE) {
-      @Override
-      public void acquireLock(TransactionLocks locks) throws IOException {
-        LockFactory lf = getInstance();
-        if(isRetryCacheEnabled) {
-          locks.add(lf.getRetryCacheEntryLock(Server.getClientId(),
-              Server.getCallId()));
-        }
-        locks.add(lf.getCachePoolLock(directive.getPool()));
-        INodeLock il = lf.getINodeLock(INodeLockType.READ, INodeResolveType.PATH_AND_IMMEDIATE_CHILDREN, path)
-            .setNameNodeID(nameNode.getId())
-            .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes())
-            .skipReadingQuotaAttr(!dir.isQuotaEnabled());
-        
-        locks.add(il).
-            add(lf.getCacheDirectiveLock(id)).
-            add(lf.getBlockLock());
-      }
-
-      @Override
-      public Object performTask() throws IOException {
-        final FSPermissionChecker pc = isPermissionEnabled ? getPermissionChecker() : null;
-
-        final CacheEntryWithPayload cacheEntry = RetryCacheDistributed.waitForCompletion(retryCache, null);
-
-        if (cacheEntry != null && cacheEntry.isSuccess()) {
-          return PBHelper.bytesToLong(cacheEntry.getPayload());
-        }
-        boolean success = false;
-        
-        String effectiveDirectiveStr = null;
-        Long result = null;
-        try {
-          
-          CacheDirectiveInfo effectiveDirective = cacheManager.addDirective(directive, pc, flags, id);
-          result = effectiveDirective.getId();
-          effectiveDirectiveStr = effectiveDirective.toString();
-          success = true;
-        } finally {
-          if (isAuditEnabled() && isExternalInvocation()) {
-            logAuditEvent(success, "addCacheDirective", effectiveDirectiveStr, null, null);
-          }
-          RetryCacheDistributed.setState(cacheEntry, success, PBHelper.longToBytes(result));
-        }
-        return result;
-      }
-    };
-    return (Long) addDirectiveHandler.handle();
-  }
-
-  void modifyCacheDirective(final CacheDirectiveInfo directive,
-      final EnumSet<CacheFlag> flags) throws IOException {
+    
+    CacheDirectiveInfo effectiveDirective = null;
     if (!flags.contains(CacheFlag.FORCE)) {
       cacheManager.waitForRescanIfNeeded();
     }
-    new HopsTransactionalRequestHandler(HDFSOperationType.MODIFY_CACHE_DIRECTIVE) {
-      String path;
-      List<String> pools = new ArrayList<>(2);
+    
+    try {
       
-      @Override
-      public void setUp() throws StorageException, IOException {
-        CacheDirectiveDataAccess da = (CacheDirectiveDataAccess) HdfsStorageFactory
-            .getDataAccess(CacheDirectiveDataAccess.class);
-          CacheDirective originalDirective = (CacheDirective) da.find(directive.getId());
-        if(directive.getPath()!=null){
-          path=directive.getPath().toString();
-        }else if(originalDirective!=null){
-          path=originalDirective.getPath();
-        }
-        if(directive.getPool()!=null){
-          pools.add(directive.getPool());
-        }
-        if(originalDirective!=null){
-          pools.add(originalDirective.getPoolName());
-        }
-          
+      if (isInSafeMode()) {
+        throw new SafeModeException(
+            "Cannot add cache directive", safeMode());
       }
-      
-      @Override
-      public void acquireLock(TransactionLocks locks) throws IOException {
-        LockFactory lf = getInstance();
-        if(isRetryCacheEnabled) {
-          locks.add(lf.getRetryCacheEntryLock(Server.getClientId(),
-              Server.getCallId()));
-        }
-        locks.add(lf.getCacheDirectiveLock(directive.getId())).
-            add(lf.getCachePoolsLock(pools));
-         INodeLock il = lf.getINodeLock(INodeLockType.READ, INodeResolveType.PATH_AND_IMMEDIATE_CHILDREN, path)
-            .setNameNodeID(nameNode.getId())
-            .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes())
-            .skipReadingQuotaAttr(!dir.isQuotaEnabled());
+      effectiveDirective = FSNDNCacheOp.addCacheDirective(this, dir, cacheManager,
+          directive, flags);
+    } finally {
+      boolean success = effectiveDirective != null;
 
-        locks.add(il).
-            add(lf.getBlockLock());
-      }
-
-      @Override
-      public Object performTask() throws IOException {
-        final FSPermissionChecker pc = isPermissionEnabled ? getPermissionChecker() : null;
-        boolean success = false;
-        CacheEntry cacheEntry = RetryCacheDistributed.waitForCompletion(retryCache);
-        if (cacheEntry != null && cacheEntry.isSuccess()) {
-          return null;
-        }
-        
-        try {
-          if (isInSafeMode()) {
-            throw new SafeModeException(
-                "Cannot add cache directive", safeMode());
-          }
-          cacheManager.modifyDirective(directive, pc, flags);
-          success = true;
-        } finally {
-          if (isAuditEnabled() && isExternalInvocation()) {
-            String idStr = "{id: " + directive.getId().toString() + "}";
-            logAuditEvent(success, "modifyCacheDirective", idStr, directive.toString(), null);
-          }
-          RetryCacheDistributed.setState(cacheEntry, success);
-        }
-        return null;
-      }
-    }.handle();
-
+      String effectiveDirectiveStr = effectiveDirective != null ?
+          effectiveDirective.toString() : null;
+      logAuditEvent(success, "addCacheDirective", effectiveDirectiveStr,
+          null, null);
+    }
+    return effectiveDirective != null ? effectiveDirective.getId() : 0;
   }
 
-  void removeCacheDirective(final Long id) throws IOException {
-    new HopsTransactionalRequestHandler(HDFSOperationType.REMOVE_CACHE_DIRECTIVE) {
-      @Override
-      public void acquireLock(TransactionLocks locks) throws IOException {
-        LockFactory lf = getInstance();
-        if(isRetryCacheEnabled) {
-          locks.add(lf.getRetryCacheEntryLock(Server.getClientId(),
-              Server.getCallId()));
-        }
-        locks.add(lf.getCacheDirectiveLock(id)).
-            add(lf.getCachePoolLock(LockType.WRITE));
+  void modifyCacheDirective(CacheDirectiveInfo directive,
+      EnumSet<CacheFlag> flags) throws IOException {
+    boolean success = false;
+    if (!flags.contains(CacheFlag.FORCE)) {
+      cacheManager.waitForRescanIfNeeded();
+    }
+    try {
+      if (isInSafeMode()) {
+        throw new SafeModeException(
+            "Cannot add cache directive", safeMode());
       }
+      FSNDNCacheOp.modifyCacheDirective(this, dir, cacheManager, directive, flags);
+      success = true;
+    } finally {
+      String idStr = "{id: " + directive.getId().toString() + "}";
+      logAuditEvent(success, "modifyCacheDirective", idStr,
+          directive.toString(), null);
+    }
+  }
 
-      @Override
-      public Object performTask() throws IOException {
-        final FSPermissionChecker pc = isPermissionEnabled ? getPermissionChecker() : null;
-        CacheEntry cacheEntry = RetryCacheDistributed.waitForCompletion(retryCache);
-        if (cacheEntry != null && cacheEntry.isSuccess()) {
-          return null;
-        }
-        boolean success = false;
-        try {
-          if (isInSafeMode()) {
-            throw new SafeModeException(
-                "Cannot remove cache directives", safeMode());
-          }
-          cacheManager.removeDirective(id, pc);
-          success = true;
-        } finally {
-          if (isAuditEnabled() && isExternalInvocation()) {
-            String idStr = "{id: " + id.toString() + "}";
-            logAuditEvent(success, "removeCacheDirective", idStr, null,
-                null);
-          }
-          RetryCacheDistributed.setState(cacheEntry, success);
-        }
-        return null;
+  void removeCacheDirective(long id) throws IOException {
+    boolean success = false;
+    try {
+      if (isInSafeMode()) {
+        throw new SafeModeException(
+            "Cannot remove cache directives", safeMode());
       }
-    }.handle();
+      FSNDNCacheOp.removeCacheDirective(this, cacheManager, id);
+      success = true;
+    } finally {
+      String idStr = "{id: " + Long.toString(id) + "}";
+      logAuditEvent(success, "removeCacheDirective", idStr, null,
+          null);
+    }
   }
 
   BatchedListEntries<CacheDirectiveEntry> listCacheDirectives(
       long startId, CacheDirectiveInfo filter) throws IOException {
-    final FSPermissionChecker pc = isPermissionEnabled ?
-        getPermissionChecker() : null;
     BatchedListEntries<CacheDirectiveEntry> results;
     cacheManager.waitForRescanIfNeeded();
     boolean success = false;
     try {
-      results =
-          cacheManager.listCacheDirectives(startId, filter, pc);
+      results = FSNDNCacheOp.listCacheDirectives(this, cacheManager, startId,
+          filter);
       success = true;
     } finally {
-      if (isAuditEnabled() && isExternalInvocation()) {
-        logAuditEvent(success, "listCacheDirectives", filter.toString(), null,
-            null);
-      }
+      logAuditEvent(success, "listCacheDirectives", filter.toString(), null,
+          null);
     }
     return results;
-}
+  }
   
-  public void addCachePool(final CachePoolInfo req) throws IOException {
-    CachePoolInfo.validate(req);
-    final String poolName = req.getPoolName();
-    new HopsTransactionalRequestHandler(HDFSOperationType.ADD_CACHE_POOL) {
-      @Override
-      public void acquireLock(TransactionLocks locks) throws IOException {
-        LockFactory lf = getInstance();
-        if(isRetryCacheEnabled) {
-          locks.add(lf.getRetryCacheEntryLock(Server.getClientId(),
-              Server.getCallId()));
-        }
-        locks.add(lf.getCachePoolLock(poolName));
-      }
-
-      @Override
-      public Object performTask() throws IOException {
-        final FSPermissionChecker pc = isPermissionEnabled ? getPermissionChecker() : null;
-        CacheEntry cacheEntry = RetryCacheDistributed.waitForCompletion(retryCache);
-        if (cacheEntry != null && cacheEntry.isSuccess()) {
-          return null; // Return previous response
-        }
-        boolean success = false;
-        String poolInfoStr = null;
-        try {
-          if (isInSafeMode()) {
-            throw new SafeModeException(
-                "Cannot add cache pool " + req.getPoolName(), safeMode());
-          }
-          if (pc != null) {
-            pc.checkSuperuserPrivilege();
-          }
-          CachePoolInfo info = cacheManager.addCachePool(req);
-          poolInfoStr = info.toString();
-
-          success = true;
-        } finally {
-
-          if (isAuditEnabled() && isExternalInvocation()) {
-            logAuditEvent(success, "addCachePool", poolInfoStr, null, null);
-          }
-          RetryCacheDistributed.setState(cacheEntry, success);
-        }
-        return null;
-      }
-    }.handle();
-  }
-
-  //Need write lock on variable NeedRescan
-  public void modifyCachePool(final CachePoolInfo req) throws IOException {
-    CachePoolInfo.validate(req);
-    final String poolName = req.getPoolName();
-    new HopsTransactionalRequestHandler(HDFSOperationType.MODIFY_CACHE_POOL) {
-      @Override
-      public void acquireLock(TransactionLocks locks) throws IOException {
-        LockFactory lf = getInstance();
-        if(isRetryCacheEnabled) {
-          locks.add(lf.getRetryCacheEntryLock(Server.getClientId(),
-              Server.getCallId()));
-        }
-        locks.add(lf.getCachePoolLock(poolName));
-      }
-
-      @Override
-      public Object performTask() throws IOException {
-        final FSPermissionChecker pc = isPermissionEnabled ? getPermissionChecker() : null;
-        CacheEntry cacheEntry = RetryCacheDistributed.waitForCompletion(retryCache);
-        if (cacheEntry != null && cacheEntry.isSuccess()) {
-          return null; // Return previous response
-        }
-        boolean success = false;
-        try {
-          if (isInSafeMode()) {
-            throw new SafeModeException(
-                "Cannot modify cache pool " + req.getPoolName(), safeMode());
-          }
-          if (pc != null) {
-            pc.checkSuperuserPrivilege();
-          }
-          cacheManager.modifyCachePool(req);
-          success = true;
-        } finally {
-          if (isAuditEnabled() && isExternalInvocation()) {
-            String poolNameStr = "{poolName: " + req.getPoolName() + "}";
-            logAuditEvent(success, "modifyCachePool", poolNameStr, req.toString(), null);
-          }
-          RetryCacheDistributed.setState(cacheEntry, success);
-        }
-        return null;
-      }
-    }.handle();
-  }
-
-  //Need write lock on variable NeedRescan
-  public void removeCachePool(final String cachePoolName) throws IOException {
-    CachePoolInfo.validateName(cachePoolName);
-    new HopsTransactionalRequestHandler(HDFSOperationType.REMOVE_CACHE_POOL) {
-      @Override
-      public void acquireLock(TransactionLocks locks) throws IOException {
-        LockFactory lf = getInstance();
-        if(isRetryCacheEnabled) {
-          locks.add(lf.getRetryCacheEntryLock(Server.getClientId(),
-              Server.getCallId()));
-        }
-        locks.add(lf.getCachePoolLock(cachePoolName)).
-            add(lf.getCacheDirectiveLock(cachePoolName));
-      }
-
-      @Override
-      public Object performTask() throws IOException {
-        final FSPermissionChecker pc = isPermissionEnabled ? getPermissionChecker() : null;
-        CacheEntry cacheEntry = RetryCacheDistributed.waitForCompletion(retryCache);
-        if (cacheEntry != null && cacheEntry.isSuccess()) {
-          return null; // Return previous response
-        }
-        boolean success = false;
-        try {
-          if (isInSafeMode()) {
-            throw new SafeModeException(
-                "Cannot remove cache pool " + cachePoolName, safeMode());
-          }
-          if (pc != null) {
-            pc.checkSuperuserPrivilege();
-          }
-          cacheManager.removeCachePool(cachePoolName);
-          success = true;
-        } finally {
-          if (isAuditEnabled() && isExternalInvocation()) {
-            String poolNameStr = "{poolName: " + cachePoolName + "}";
-            logAuditEvent(success, "removeCachePool", poolNameStr, null, null);
-          }
-        }
-        return null;
-      }
-    }.handle();
-  }
-
-  //need to lock varialbe needRescan with Read lock
-  public BatchedListEntries<CachePoolEntry> listCachePools(String prevKey)
+  void addCachePool(CachePoolInfo req)
       throws IOException {
-    final FSPermissionChecker pc =
-        isPermissionEnabled ? getPermissionChecker() : null;
+    boolean success = false;
+    String poolInfoStr = null;
+    try {
+      if (isInSafeMode()) {
+        throw new SafeModeException(
+            "Cannot add cache pool " + req.getPoolName(), safeMode());
+      }
+      CachePoolInfo info = FSNDNCacheOp.addCachePool(this, cacheManager, req);
+      poolInfoStr = info.toString();
+      success = true;
+    } finally {
+      logAuditEvent(success, "addCachePool", poolInfoStr, null, null);
+    }
+    
+  }
+
+  void modifyCachePool(CachePoolInfo req)
+      throws IOException {
+    boolean success = false;
+    try {
+      if (isInSafeMode()) {
+        throw new SafeModeException(
+            "Cannot modify cache pool " + req.getPoolName(), safeMode());
+      }
+      FSNDNCacheOp.modifyCachePool(this, cacheManager, req);
+      success = true;
+    } finally {
+      String poolNameStr = "{poolName: " +
+          (req == null ? null : req.getPoolName()) + "}";
+      logAuditEvent(success, "modifyCachePool", poolNameStr,
+                    req == null ? null : req.toString(), null);
+    }
+
+  }
+
+  void removeCachePool(String cachePoolName)
+      throws IOException {
+    boolean success = false;
+    try {
+      if (isInSafeMode()) {
+        throw new SafeModeException(
+            "Cannot remove cache pool " + cachePoolName, safeMode());
+      }
+      FSNDNCacheOp.removeCachePool(this, cacheManager, cachePoolName);
+      success = true;
+    } finally {
+      String poolNameStr = "{poolName: " + cachePoolName + "}";
+      logAuditEvent(success, "removeCachePool", poolNameStr, null, null);
+    }
+    
+  }
+
+  BatchedListEntries<CachePoolEntry> listCachePools(String prevKey)
+      throws IOException {
     BatchedListEntries<CachePoolEntry> results;
     boolean success = false;
     cacheManager.waitForRescanIfNeeded();
     try {
-      results = cacheManager.listCachePools(pc, prevKey);
+      results = FSNDNCacheOp.listCachePools(this, cacheManager, prevKey);
       success = true;
     } finally {
-      if (isAuditEnabled() && isExternalInvocation()) {
-        logAuditEvent(success, "listCachePools", null, null, null);
-      }
+      logAuditEvent(success, "listCachePools", null, null, null);
     }
     return results;
-  }
+}
 
   /**
    * Default AuditLogger implementation; used when no access logger is
@@ -7691,7 +6857,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
         @Override
         public void handle(int startIndex, int endIndex) throws Exception {
           final List<Long> ids = safeBlocks.subList(startIndex, endIndex);
-          addSafeBlocksTX(safeBlocks, added);
+          addSafeBlocksTX(ids, added);
         }
       });
     } catch (Exception e) {
@@ -7736,10 +6902,6 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     }.handle();
   }
 
-  boolean isPermissionEnabled() {
-    return isPermissionEnabled;
-  }
-
   public ExecutorService getFSOperationsExecutor() {
     return fsOperationsExecutor;
   }
@@ -7762,693 +6924,11 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    *    the diskspace quota to be set
    * @throws IOException, UnresolvedLinkException
    */
-  void multiTransactionalSetQuota(final String path1, final long nsQuota,
-      final long dsQuota) throws IOException {
-    checkSuperuserPrivilege();
-    checkNameNodeSafeMode("Cannot set quota on " + path1);
-
-    if(!nameNode.isLeader() && dir.isQuotaEnabled()){
-      throw new NotALeaderException("Quota enabled. Delete operation can only be performed on a " +
-              "leader namenode");
-    }
-
-    INodeIdentifier subtreeRoot = null;
-    boolean removeSTOLock = false;
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(path1);
-    final String path = dir.resolvePath(path1, pathComponents, dir);
-    try {
-      PathInformation pathInfo = getPathExistingINodesFromDB(path,
-          false, null, null, null, null);
-      INode lastComp = pathInfo.getPathInodes()[pathInfo.getPathComponents().length-1];
-      if(lastComp == null){
-        throw new FileNotFoundException("Directory does not exist: " + path);
-      }else if(!lastComp.isDirectory()){
-        throw new FileNotFoundException(path + ": Is not a directory");
-      } else if(lastComp.isRoot() && nsQuota == HdfsConstants.QUOTA_RESET){
-        throw new IllegalArgumentException(
-            "Cannot clear namespace quota on root.");
-      }
-
-      //check if the path is root
-      if(INode.getPathNames(path).length == 0){ // this method return empty array in case of
-        // path = "/"
-        subtreeRoot = INodeDirectory.getRootIdentifier();
-      }else{
-        //this can only be called by super user we just want to lock the tree, not check needed
-        subtreeRoot = lockSubtree(path, SubTreeOperation.Type.QUOTA_STO);
-        if(subtreeRoot == null){
-          // in the mean while the dir has been deleted by someone
-          throw new FileNotFoundException("Directory does not exist: " + path);
-        }
-        removeSTOLock = true;
-      }
-
-      final AbstractFileTree.IdCollectingCountingFileTree fileTree =
-          new AbstractFileTree.IdCollectingCountingFileTree(this,
-              subtreeRoot);
-      fileTree.buildUp();
-      Iterator<Long> idIterator =
-          fileTree.getOrderedIds().descendingIterator();
-      synchronized (idIterator) {
-        quotaUpdateManager.addPrioritizedUpdates(idIterator);
-        try {
-          idIterator.wait();
-        } catch (InterruptedException e) {
-          // Not sure if this can happen if we are not shutting down but we
-          // need to abort in case it happens.
-          throw new IOException("Operation failed due to an Interrupt");
-        }
-      }
-
-      HopsTransactionalRequestHandler setQuotaHandler =
-          new HopsTransactionalRequestHandler(HDFSOperationType.SET_QUOTA,
-              path) {
-            @Override
-            public void acquireLock(TransactionLocks locks) throws IOException {
-              LockFactory lf = LockFactory.getInstance();
-              INodeLock il = lf.getINodeLock(INodeLockType.WRITE, INodeResolveType.PATH, path)
-                      .setNameNodeID(nameNode.getId())
-                      .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes())
-                      .setIgnoredSTOInodes(fileTree.getSubtreeRootId().getInodeId())
-                      .setIgnoredSTOInodes(fileTree.getSubtreeRootId().getInodeId());
-              locks.add(il).add(lf.getBlockLock());
-            }
-
-            @Override
-            public Object performTask() throws IOException {
-              dir.setQuota(path, nsQuota, dsQuota, fileTree.getNamespaceCount(),
-                  fileTree.getDiskspaceCount());
-              return null;
-            }
-          };
-      setQuotaHandler.handle(this);
-    } finally {
-      if(removeSTOLock){
-        unlockSubtree(path, subtreeRoot.getInodeId());
-      }
-    }
-  }
-
-  /**
-   * Renaming a directory tree in multiple transactions. Renaming a large
-   * directory tree might take to much time for a single transaction when
-   * its quota counts need to be calculated. Hence, this functions first
-   * reads up the whole tree in multiple transactions while calculating its
-   * quota counts before executing the rename in a single transaction.
-   * The subtree is locked during these operations in order to prevent any
-   * concurrent modification.
-   *
-   * @param src1
-   *    the source
-   * @param dst1
-   *    the destination
-   * @throws IOException
-   */
-  void multiTransactionalRename(final String src1, final String dst1,
-      final Options.Rename... options) throws IOException {
-    //only for testing
-    saveTimes();
-
-    CacheEntry cacheEntry = retryCacheWaitForCompletionTransactional();
-    if (cacheEntry != null && cacheEntry.isSuccess()) {
-      return; // Return previous response
-    }
-    if (NameNode.stateChangeLog.isDebugEnabled()) {
-      NameNode.stateChangeLog.debug(
-          "DIR* NameSystem.multiTransactionalRename: with options - " + src1
-              + " to " + dst1);
-    }
-    if (!DFSUtil.isValidName(dst1)) {
-      throw new InvalidPathException("Invalid name: " + dst1);
-    }
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src1);
-    final String src = dir.resolvePath(src1, pathComponents, dir);
-    pathComponents = FSDirectory.getPathComponentsForReservedPath(dst1);
-    final String dst = dir.resolvePath(dst1, pathComponents, dir);
-
-    boolean success = false;
-
-    try {
-    if (isInSafeMode()) {
-      checkNameNodeSafeMode("Cannot rename " + src);
-    }
-
-    if (dst.equals(src)) {
-      throw new FileAlreadyExistsException(
-          "The source " + src + " and destination " + dst + " are the same");
-    }
-    // dst cannot be a directory or a file under src
-    if (dst.startsWith(src)
-        && dst.charAt(src.length()) == Path.SEPARATOR_CHAR) {
-      String error = "Rename destination " + dst
-          + " is a directory or file under source " + src;
-      NameNode.stateChangeLog
-          .warn("DIR* FSDirectory.unprotectedRenameTo: " + error);
-      throw new IOException(error);
-    }
-    //--
-    boolean overwrite = false;
-    if (null != options) {
-      for (Rename option : options) {
-        if (option == Rename.OVERWRITE) {
-          overwrite = true;
-        }
-      }
-    }
-    String error;
-    PathInformation srcInfo = getPathExistingINodesFromDB(src,
-        false, null, FsAction.WRITE, null, null);
-    INode[] srcInodes = srcInfo.getPathInodes();
-    INode srcInode = srcInodes[srcInodes.length - 1];
-    // validate source
-    if (srcInode == null) {
-      error = "rename source " + src + " is not found.";
-      NameNode.stateChangeLog
-          .warn("DIR* FSDirectory.unprotectedRenameTo: " + error);
-      throw new FileNotFoundException(error);
-    }
-    if (srcInodes.length == 1) {
-      error = "rename source cannot be the root";
-      NameNode.stateChangeLog
-          .warn("DIR* FSDirectory.unprotectedRenameTo: " + error);
-      throw new IOException(error);
-    }
-    if (srcInode.isSymlink()
-        && dst.equals(((INodeSymlink) srcInode).getSymlinkString())) {
-      throw new FileAlreadyExistsException(
-          "Cannot rename symlink " + src + " to its target " + dst);
-    }
-
-    //validate dst
-    PathInformation dstInfo = getPathExistingINodesFromDB(dst,
-        false, FsAction.WRITE, null, null, null);
-    INode[] dstInodes = dstInfo.getPathInodes();
-    INode dstInode = dstInodes[dstInodes.length - 1];
-    if (dstInodes.length == 1) {
-      error = "rename destination cannot be the root";
-      NameNode.stateChangeLog
-          .warn("DIR* FSDirectory.unprotectedRenameTo: " + error);
-      throw new IOException(error);
-    }
-    if (dstInode != null) { // Destination exists
-      // It's OK to rename a file to a symlink and vice versa
-      if (dstInode.isDirectory() != srcInode.isDirectory()) {
-        error = "Source " + src + " and destination " + dst
-            + " must both be directories";
-        NameNode.stateChangeLog
-            .warn("DIR* FSDirectory.unprotectedRenameTo: " + error);
-        throw new IOException(error);
-      }
-      if (!overwrite) { // If destination exists, overwrite flag must be true
-        error = "rename destination " + dst + " already exists";
-        NameNode.stateChangeLog
-            .warn("DIR* FSDirectory.unprotectedRenameTo: " + error);
-        throw new FileAlreadyExistsException(error);
-      }
-
-      short depth = (short) (INodeDirectory.ROOT_DIR_DEPTH + dstInfo.getPathInodes().length-1);
-      boolean areChildrenRandomlyPartitioned = INode.isTreeLevelRandomPartitioned(depth);
-      if (dstInode.isDirectory() && dir.hasChildren(dstInode.getId(),areChildrenRandomlyPartitioned)) {
-        error =
-            "rename cannot overwrite non empty destination directory " + dst;
-        NameNode.stateChangeLog
-            .warn("DIR* FSDirectory.unprotectedRenameTo: " + error);
-        throw new IOException(error);
-      }
-    }
-    if (dstInodes[dstInodes.length - 2] == null) {
-      error = "rename destination parent " + dst + " not found.";
-      NameNode.stateChangeLog
-          .warn("DIR* FSDirectory.unprotectedRenameTo: " + error);
-      throw new FileNotFoundException(error);
-    }
-    if (!dstInodes[dstInodes.length - 2].isDirectory()) {
-      error = "rename destination parent " + dst + " is a file.";
-      NameNode.stateChangeLog
-          .warn("DIR* FSDirectory.unprotectedRenameTo: " + error);
-      throw new ParentNotDirectoryException(error);
-    }
-
-    INode srcDataSet = getMetaEnabledParent(srcInodes);
-    INode dstDataSet = getMetaEnabledParent(dstInodes);
-    Collection<MetadataLogEntry> logEntries = Collections.EMPTY_LIST;
-
-    //--
-    //TODO [S]  if src is a file then there is no need for sub tree locking
-    //mechanism on the src and dst
-    //However the quota is enabled then all the quota update on the dst
-    //must be applied before the move operation.
-    INode.DirCounts srcCounts = new INode.DirCounts();
-    srcCounts.nsCount = srcInfo.getNsCount(); //if not dir then it will return zero
-    srcCounts.dsCount = srcInfo.getDsCount();
-    INode.DirCounts dstCounts = new INode.DirCounts();
-    dstCounts.nsCount = dstInfo.getNsCount();
-    dstCounts.dsCount = dstInfo.getDsCount();
-    boolean isUsingSubTreeLocks = srcInfo.isDir();
-    boolean renameTransactionCommitted = false;
-    INodeIdentifier srcSubTreeRoot = null;
-    String subTreeLockDst = INode.constructPath(dstInfo.getPathComponents(),
-        0, dstInfo.getNumExistingComp());
-    if(subTreeLockDst.equals(INodeDirectory.ROOT_NAME)){
-      subTreeLockDst = "/"; // absolute path
-    }
-    try {
-      if (isUsingSubTreeLocks) {
-        LOG.debug("Rename src: " + src + " dst: " + dst + " requires sub-tree locking mechanism");
-        //checkin parentAccess is enough for this operation, no need to pass access argument to QuotaCountingFileTree
-        //permission check in Apache Hadoop: doCheckOwner:false, ancestorAccess:null, parentAccess:FsAction.WRITE, 
-        //access:null, subAccess:null, ignoreEmptyDir:false
-        srcSubTreeRoot = lockSubtreeAndCheckOwnerAndParentPermission(src, false, 
-            FsAction.WRITE, SubTreeOperation.Type.RENAME_STO);
-
-        if (srcSubTreeRoot != null) {
-          AbstractFileTree.QuotaCountingFileTree srcFileTree;
-          if (shouldLogSubtreeInodes(srcInfo, dstInfo, srcDataSet,
-              dstDataSet, srcSubTreeRoot)) {
-            srcFileTree = new AbstractFileTree.LoggingQuotaCountingFileTree(this,
-                    srcSubTreeRoot, srcDataSet, dstDataSet);
-            srcFileTree.buildUp();
-            logEntries = ((AbstractFileTree.LoggingQuotaCountingFileTree) srcFileTree).getMetadataLogEntries();
-          } else {
-            srcFileTree = new AbstractFileTree.QuotaCountingFileTree(this,
-                    srcSubTreeRoot);
-            srcFileTree.buildUp();
-          }
-          srcCounts.nsCount = srcFileTree.getNamespaceCount();
-          srcCounts.dsCount = srcFileTree.getDiskspaceCount();
-
-          delayAfterBbuildingTree("Built Tree for "+src1+" for rename. ");
-        }
-      } else {
-        LOG.debug("Rename src: " + src + " dst: " + dst + " does not require sub-tree locking mechanism");
-      }
-
-      renameTo(src, srcSubTreeRoot != null?srcSubTreeRoot.getInodeId():0,
-              dst, srcCounts, dstCounts, isUsingSubTreeLocks,
-              subTreeLockDst, logEntries, options);
-
-      renameTransactionCommitted = true;
-    } finally {
-      if (!renameTransactionCommitted) {
-        if (srcSubTreeRoot != null) { //only unlock if locked
-          unlockSubtree(src, srcSubTreeRoot.getInodeId());
-        }
-      }
-    }
-      success = true;
-    } finally {
-      retryCacheSetStateTransactional(cacheEntry, success);
-    }
-  }
-
-  private boolean pathIsMetaEnabled(INode[] pathComponents) {
-    return getMetaEnabledParent(pathComponents) == null ? false : true;
-  }
-
-  private INode getMetaEnabledParent(INode[] pathComponents) {
-    for (INode node : pathComponents) {
-      if (node != null && node.isDirectory()) {
-        INodeDirectory dir = (INodeDirectory) node;
-        if (dir.isMetaEnabled()) {
-          return dir;
-        }
-      }
-    }
-    return null;
-  }
-
-  void renameTo(final String src1, final long srcINodeID, final String dst1,
-                        final INode.DirCounts srcCounts, final INode.DirCounts dstCounts,
-                        final boolean isUsingSubTreeLocks, final String subTreeLockDst,
-                        final Collection<MetadataLogEntry> logEntries,
-                        final Options.Rename... options) throws IOException {
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src1);
-    final String src = dir.resolvePath(src1, pathComponents, dir);
-    pathComponents = FSDirectory.getPathComponentsForReservedPath(dst1);
-    final String dst = dir.resolvePath(dst1, pathComponents, dir);
-    new HopsTransactionalRequestHandler(
-        isUsingSubTreeLocks?HDFSOperationType.SUBTREE_RENAME:
-            HDFSOperationType.RENAME, src) {
-      @Override
-      public void acquireLock(TransactionLocks locks) throws IOException {
-        LockFactory lf = LockFactory.getInstance();
-        INodeLock il = lf.getRenameINodeLock(INodeLockType.WRITE_ON_TARGET_AND_PARENT,
-                INodeResolveType.PATH, src, dst)
-                .setNameNodeID(nameNode.getId())
-                .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes());
-        if (isUsingSubTreeLocks) {
-          il.setIgnoredSTOInodes(srcINodeID);
-        }
-        locks.add(il)
-            .add(lf.getBlockLock())
-            .add(lf.getBlockRelated(BLK.RE, BLK.CR, BLK.UC, BLK.UR, BLK.IV,
-                BLK.PE, BLK.ER));
-        if (dir.isQuotaEnabled()) {
-          locks.add(lf.getQuotaUpdateLock(true, src, dst));
-        }
-        if(!isUsingSubTreeLocks){
-          locks.add(lf.getLeaseLock(LockType.WRITE))
-              .add(lf.getLeasePathLock(LockType.READ_COMMITTED));
-        }else{
-          locks.add(lf.getLeaseLock(LockType.WRITE))
-              .add(lf.getLeasePathLock(LockType.WRITE, src));
-        }
-        if (erasureCodingEnabled) {
-          locks.add(lf.getEncodingStatusLock(LockType.WRITE, dst));
-        }
-        locks.add(lf.getAcesLock());
-
-        for (Options.Rename op : options) {
-          if (op == Rename.OVERWRITE) {
-            locks.add(lf.getAllUsedHashBucketsLock());
-          }
-        }
-      }
-
-      @Override
-      public Object performTask() throws IOException {
-        if (NameNode.stateChangeLog.isDebugEnabled()) {
-          NameNode.stateChangeLog.debug(
-              "DIR* NameSystem.renameTo: with options - " + src + " to " + dst);
-        }
-
-        checkNameNodeSafeMode("Cannot rename " + src);
-        if (!DFSUtil.isValidName(dst)) {
-          throw new InvalidPathException("Invalid name: " + dst);
-        }
-        for (MetadataLogEntry logEntry : logEntries) {
-          EntityManager.add(logEntry);
-        }
-
-        AbstractFileTree.LoggingQuotaCountingFileTree.updateLogicalTime
-            (logEntries);
-
-        for (Options.Rename op : options) {
-          if (op == Rename.KEEP_ENCODING_STATUS) {
-            INodesInPath srcInodesInPath =
-                dir.getINodesInPath(src, false);
-            INode[] srcNodes = srcInodesInPath.getINodes();
-            INodesInPath dstInodesInPath =
-                dir.getINodesInPath(dst, false);
-            INode[] dstNodes = dstInodesInPath.getINodes();
-            INode srcNode = srcNodes[srcNodes.length - 1];
-            INode dstNode = dstNodes[dstNodes.length - 1];
-            EncodingStatus status = EntityManager.find(
-                EncodingStatus.Finder.ByInodeId, dstNode.getId());
-            EncodingStatus newStatus = new EncodingStatus(status);
-            newStatus.setInodeId(srcNode.getId(), srcNode.isInTree());
-            EntityManager.add(newStatus);
-            EntityManager.remove(status);
-            break;
-          }
-        }
-
-        removeSubTreeLocksForRenameInternal(src, isUsingSubTreeLocks,
-            subTreeLockDst);
-        long mtime = now();
-        dir.renameTo(src, dst, mtime, srcCounts, dstCounts,
-            options);
-        return null;
-      }
-    }.handle(this);
-  }
-
-  private void removeSubTreeLocksForRenameInternal(final String src,
-      final boolean isUsingSubTreeLocks, final String subTreeLockDst)
-      throws StorageException, TransactionContextException,
-      UnresolvedLinkException {
-    if (isUsingSubTreeLocks) {
-      INode[] nodes;
-      INode inode;
-      if (!src.equals("/")) {
-        EntityManager.remove(new SubTreeOperation(getSubTreeLockPathPrefix(src)));
-        INodesInPath inodesInPath = dir.getINodesInPath(src, false);
-        nodes = inodesInPath.getINodes();
-        inode = nodes[nodes.length - 1];
-        if (inode != null && inode.isSTOLocked()) {
-          inode.setSubtreeLocked(false);
-          EntityManager.update(inode);
-        }
-      }
-    }
-  }
-
-  @Deprecated
-  boolean multiTransactionalRename(final String src, final String dst)
+  void setQuota(String src, long nsQuota, long dsQuota)
       throws IOException {
-    //only for testing
-    saveTimes();
-
-    CacheEntry cacheEntry = retryCacheWaitForCompletionTransactional();
-    if (cacheEntry != null && cacheEntry.isSuccess()) {
-      return true; // Return previous response
-    }
-    boolean ret = false;
-    try{
-      ret = renameToInt(src, dst);
-    } finally {
-      retryCacheSetStateTransactional(cacheEntry, ret);
-    }
-    return ret;
-   }
-
-   private boolean renameToInt(final String src1, final String dst1) throws IOException{
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src1);
-    final String src = dir.resolvePath(src1, pathComponents, dir);
-    pathComponents = FSDirectory.getPathComponentsForReservedPath(dst1);
-    final String dst = dir.resolvePath(dst1, pathComponents, dir);
-    if (NameNode.stateChangeLog.isDebugEnabled()) {
-      NameNode.stateChangeLog.debug(
-          "DIR* NameSystem.multiTransactionalRename: with options - " + src +
-              " to " + dst);
-    }
-
-    checkNameNodeSafeMode("Cannot rename " + src);
-    if (!DFSUtil.isValidName(dst)) {
-      throw new InvalidPathException("Invalid name: " + dst);
-    }
-
-    if (INode.getPathComponents(src).length == 1) {
-      NameNode.stateChangeLog.warn(
-          "DIR* FSDirectory.unprotectedRenameTo: " + "failed to rename " + src +
-              " to " + dst + " because source is the root");
-      return false;
-    }
-
-
-    PathInformation srcInfo = getPathExistingINodesFromDB(src,
-        false, null, FsAction.WRITE, null, null);
-    INode[] srcInodes = srcInfo.getPathInodes();
-    INode srcInode = srcInodes[srcInodes.length - 1];
-    if(srcInode == null){
-      NameNode.stateChangeLog.warn(
-          "DIR* FSDirectory.unprotectedRenameTo: " + "failed to rename " + src +
-              " to " + dst + " because source does not exist");
-      return false;
-    }
-
-    PathInformation dstInfo = getPathExistingINodesFromDB(dst,
-        false, FsAction.WRITE, null, null, null);
-    String actualDst = dst;
-    if(dstInfo.isDir()){
-      actualDst += Path.SEPARATOR + new Path(src).getName();
-    }
-
-    if (actualDst.equals(src)) {
-      return true;
-    }
-
-    INode[] dstInodes =  dstInfo.getPathInodes();
-    if(dstInodes[dstInodes.length-2] == null){
-      NameNode.stateChangeLog.warn(
-          "DIR* FSDirectory.unprotectedRenameTo: " + "failed to rename " + src +
-              " to " + dst +
-              " because destination's parent does not exist");
-      return false;
-    }
-
-    if (actualDst.startsWith(src) &&
-        actualDst.charAt(src.length()) == Path.SEPARATOR_CHAR) {
-      NameNode.stateChangeLog.warn(
-          "DIR* FSDirectory.unprotectedRenameTo: " + "failed to rename " + src +
-              " to " + actualDst + " because destination starts with src");
-      return false;
-    }
-
-    INode srcDataSet = getMetaEnabledParent(srcInfo.getPathInodes());
-    INode dstDataSet = getMetaEnabledParent(dstInfo.getPathInodes());
-    Collection<MetadataLogEntry> logEntries = Collections.EMPTY_LIST;
-
-    //TODO [S]  if src is a file then there is no need for sub tree locking
-    //mechanism on the src and dst
-    //However the quota is enabled then all the quota update on the dst
-    //must be applied before the move operation.
-    INode.DirCounts srcCounts = new INode.DirCounts();
-    srcCounts.nsCount = srcInfo.getNsCount(); //if not dir then it will return zero
-    srcCounts.dsCount = srcInfo.getDsCount();
-    INode.DirCounts dstCounts = new INode.DirCounts();
-    dstCounts.nsCount = dstInfo.getNsCount();
-    dstCounts.dsCount = dstInfo.getDsCount();
-    boolean isUsingSubTreeLocks = srcInfo.isDir();
-    boolean renameTransactionCommitted = false;
-    INodeIdentifier srcSubTreeRoot = null;
-
-    String subTreeLockDst = INode.constructPath(dstInfo.getPathComponents(),
-        0,  dstInfo.getNumExistingComp());
-    if(subTreeLockDst.equals(INodeDirectory.ROOT_NAME)){
-      subTreeLockDst = "/"; // absolute path
-    }
-    try {
-      if (isUsingSubTreeLocks) {
-        LOG.debug("Rename src: "+src+" dst: "+dst+" requires sub-tree locking mechanism");
-        //checkin parentAccess is enough for this operation, no need to pass access argument to QuotaCountingFileTree
-        //permission check in Apache Hadoop: doCheckOwner:false, ancestorAccess:null, parentAccess:FsAction.WRITE, 
-        //access:null, subAccess:null, ignoreEmptyDir:false
-        srcSubTreeRoot = lockSubtreeAndCheckOwnerAndParentPermission(src, false, 
-            FsAction.WRITE, SubTreeOperation.Type.RENAME_STO);
-
-        if (srcSubTreeRoot != null) {
-          AbstractFileTree.QuotaCountingFileTree srcFileTree;
-          if (shouldLogSubtreeInodes(srcInfo, dstInfo, srcDataSet,
-              dstDataSet, srcSubTreeRoot)) {
-            srcFileTree = new AbstractFileTree.LoggingQuotaCountingFileTree(this,
-                    srcSubTreeRoot, srcDataSet, dstDataSet);
-            srcFileTree.buildUp();
-            logEntries = ((AbstractFileTree.LoggingQuotaCountingFileTree) srcFileTree).getMetadataLogEntries();
-          } else {
-            srcFileTree = new AbstractFileTree.QuotaCountingFileTree(this,
-                    srcSubTreeRoot);
-            srcFileTree.buildUp();
-          }
-          srcCounts.nsCount = srcFileTree.getNamespaceCount();
-          srcCounts.dsCount = srcFileTree.getDiskspaceCount();
-        }
-        delayAfterBbuildingTree("Built tree of "+src1+" for rename. ");
-      } else {
-        LOG.debug("Rename src: " + src + " dst: " + dst + " does not require sub-tree locking mechanism");
-      }
-
-      boolean retValue = renameTo(src, srcSubTreeRoot != null?srcSubTreeRoot.getInodeId():0L,
-              dst, srcCounts, dstCounts, isUsingSubTreeLocks, subTreeLockDst, logEntries);
-
-      // the rename Tx has committed. it has also remove the subTreeLocks
-      renameTransactionCommitted = true;
-
-      return retValue;
-
-    } finally {
-      if (!renameTransactionCommitted) {
-        if (srcSubTreeRoot != null) { //only unlock if locked
-          unlockSubtree(src, srcSubTreeRoot.getInodeId());
-        }
-     }
-    }
+    checkNameNodeSafeMode("Cannot set quota on " + src);
+    FSDirAttrOp.setQuota(dir, src, nsQuota, dsQuota);
   }
-
-  private boolean shouldLogSubtreeInodes(PathInformation srcInfo,
-      PathInformation dstInfo, INode srcDataSet, INode dstDataSet,
-      INodeIdentifier srcSubTreeRoot){
-    if(pathIsMetaEnabled(srcInfo.getPathInodes()) || pathIsMetaEnabled(dstInfo
-        .getPathInodes())){
-      if(srcDataSet == null){
-        if(dstDataSet == null){
-          //shouldn't happen
-        }else{
-          //Moving a non metaEnabled directory under a metaEnabled directory
-          return true;
-        }
-      }else{
-        if(dstDataSet == null){
-          //rename a metadateEnabled directory to a non metadataEnabled
-          // directory, always log the subtree except if it is a rename of the
-          // dataset
-          return !srcDataSet.equalsIdentifier(srcSubTreeRoot);
-        }else{
-          //Move from one dataset to another, always log except if it is the
-          //same dataset
-          return !srcDataSet.equals(dstDataSet);
-        }
-      }
-    }
-    return false;
-  }
-
-  /**
-   * Change the indicated filename.
-   *
-   * @deprecated Use {@link #multiTransactionalRename(String, String, Rename...)}}
-   * instead.
-   */
-  @Deprecated
-  boolean renameTo(final String src1, final long srcINodeID, final String dst1,
-                   final INode.DirCounts srcCounts, final INode.DirCounts dstCounts,
-                   final boolean isUsingSubTreeLocks, final String subTreeLockDst,
-                   final Collection<MetadataLogEntry> logEntries)
-      throws IOException {
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src1);
-    final String src = dir.resolvePath(src1, pathComponents, dir);
-    pathComponents = FSDirectory.getPathComponentsForReservedPath(dst1);
-    final String dst = dir.resolvePath(dst1, pathComponents, dir);
-    HopsTransactionalRequestHandler renameToHandler =
-        new HopsTransactionalRequestHandler(
-            isUsingSubTreeLocks ? HDFSOperationType.SUBTREE_DEPRICATED_RENAME :
-                HDFSOperationType.DEPRICATED_RENAME
-            , src) {
-          @Override
-          public void acquireLock(TransactionLocks locks) throws IOException {
-            LockFactory lf = LockFactory.getInstance();
-            INodeLock il = lf.getLegacyRenameINodeLock(
-                    INodeLockType.WRITE_ON_TARGET_AND_PARENT, INodeResolveType.PATH, src, dst)
-                    .setNameNodeID(nameNode.getId())
-                    .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes())
-                    .skipReadingQuotaAttr(!dir.isQuotaEnabled());
-            if(isUsingSubTreeLocks) {
-                    il.setIgnoredSTOInodes(srcINodeID);
-            }
-            locks.add(il)
-                    .add(lf.getBlockLock())
-                    .add(lf.getBlockRelated(BLK.RE, BLK.UC, BLK.IV, BLK.CR, BLK.ER, BLK.PE, BLK.UR));
-            if(!isUsingSubTreeLocks){
-              locks.add(lf.getLeaseLock(LockType.WRITE))
-                .add(lf.getLeasePathLock(LockType.READ_COMMITTED));
-            }else{
-              locks.add(lf.getLeaseLock(LockType.READ_COMMITTED))
-                  .add(lf.getLeasePathLock(LockType.READ_COMMITTED,src));
-            }
-            if (dir.isQuotaEnabled()) {
-              locks.add(lf.getQuotaUpdateLock(true, src, dst));
-            }
-          }
-
-          @Override
-          public Object performTask() throws IOException {
-            if (NameNode.stateChangeLog.isDebugEnabled()) {
-              NameNode.stateChangeLog.debug("DIR* NameSystem.renameTo: " + src
-                  + " to " + dst);
-            }
-
-            checkNameNodeSafeMode("Cannot rename " + src);
-            if (!DFSUtil.isValidName(dst)) {
-              throw new IOException("Invalid name: " + dst);
-            }
-
-            // remove the subtree locks
-            removeSubTreeLocksForRenameInternal(src, isUsingSubTreeLocks,
-                subTreeLockDst);
-
-            for (MetadataLogEntry logEntry : logEntries) {
-              EntityManager.add(logEntry);
-            }
-
-            AbstractFileTree.LoggingQuotaCountingFileTree.updateLogicalTime
-                (logEntries);
-            
-            long mtime = now();
-            return dir.renameTo(src, dst, mtime, srcCounts, dstCounts);
-          }
-        };
-    return (Boolean) renameToHandler.handle(this);
-    }
 
   /**
    * Delete a directory tree in multiple transactions. Deleting a large directory
@@ -8504,8 +6984,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
 
     PathInformation pathInfo = this.getPathExistingINodesFromDB(path,
         false, null, FsAction.WRITE, null, null);
-    INode[] pathInodes = pathInfo.getPathInodes();
-    INode pathInode = pathInodes[pathInodes.length - 1];
+    INode pathInode = pathInfo.getINodesInPath().getLastINode();
 
     if (pathInode == null) {
       NameNode.stateChangeLog
@@ -8666,7 +7145,8 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
 
                     @Override
                     public Object performTask() throws IOException {
-                      if(!deleteInternal(path,true,false)){
+                      final INodesInPath iip = dir.getINodesInPath4Write(path);
+                      if(!deleteInternal(iip,true,false)){
                         //at this point the delete op is expected to succeed. Apart from DB errors
                         // this can only fail if the quiesce phase in subtree operation failed to
                         // quiesce the subtree. See TestSubtreeConflicts.testConcurrentSTOandInodeOps
@@ -8692,8 +7172,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    *  the inode representing the root of the subtree
    * @throws IOException
    */
-  @VisibleForTesting
-  INodeIdentifier lockSubtree(final String path, SubTreeOperation.Type stoType) throws
+  public INodeIdentifier lockSubtree(final String path, SubTreeOperation.Type stoType) throws
       IOException {
     return lockSubtreeAndCheckOwnerAndParentPermission(path, false, null, stoType);
   }
@@ -8720,7 +7199,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    * @throws IOException
    */
   @VisibleForTesting
-  private INodeIdentifier lockSubtreeAndCheckOwnerAndParentPermission(final String path,
+  INodeIdentifier lockSubtreeAndCheckOwnerAndParentPermission(final String path,
       final boolean doCheckOwner, 
       final FsAction parentAccess,
       final SubTreeOperation.Type stoType) throws IOException {
@@ -8758,14 +7237,13 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       @Override
       public Object performTask() throws IOException {
         FSPermissionChecker pc = getPermissionChecker();
+        INodesInPath iip = dir.getINodesInPath(path, false);
         if (isPermissionEnabled && !pc.isSuperUser()) {
-          pc.checkPermission(path, dir, doCheckOwner,
-              null, parentAccess, null, null, true, true);
+          dir.checkPermission(pc, iip, doCheckOwner, null, parentAccess, null, null,
+              true);
         }
 
-        INodesInPath inodesInPath = dir.getINodesInPath(path, false);
-        INode[] nodes = inodesInPath.getINodes();
-        INode inode = nodes[nodes.length - 1];
+        INode inode = iip.getLastINode();
 
         if (inode != null && inode.isDirectory() &&
             !inode.isRoot()) { // never lock the fs root
@@ -8807,7 +7285,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    * @param path
    * @return /path + "/"
    */
-  private String getSubTreeLockPathPrefix(String path){
+  String getSubTreeLockPathPrefix(String path){
     String subTreeLockPrefix = path;
     if(!subTreeLockPrefix.endsWith("/")){
       subTreeLockPrefix+="/";
@@ -8869,8 +7347,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       @Override
       public Object performTask() throws IOException {
         INodesInPath inodesInPath = dir.getINodesInPath(path, false);
-        INode[] nodes = inodesInPath.getINodes();
-        INode inode = nodes[nodes.length - 1];
+        INode inode = inodesInPath.getLastINode();
         if (inode != null && inode.isSTOLocked()) {
           inode.setSubtreeLocked(false);
           EntityManager.update(inode);
@@ -8899,8 +7376,10 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   /**
    * @see org.apache.hadoop.hdfs.protocol.ClientProtocol#getEncodingStatus
    */
-  public EncodingStatus getEncodingStatus(final String filePath)
+  public EncodingStatus getEncodingStatus(final String filePathArg)
       throws IOException {
+    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(filePathArg);
+    final String filePath = dir.resolvePath(filePathArg, pathComponents, dir);
     HopsTransactionalRequestHandler findReq =
         new HopsTransactionalRequestHandler(
             HDFSOperationType.FIND_ENCODING_STATUS) {
@@ -8916,15 +7395,16 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
           @Override
           public Object performTask() throws IOException {
             FSPermissionChecker pc = getPermissionChecker();
+            INodesInPath iip = dir.getINodesInPath(filePath, true);
             try {
               if (isPermissionEnabled) {
-                checkPathAccess(pc, filePath, FsAction.READ);
+                dir.checkPathAccess(pc, iip, FsAction.READ);
               }
             } catch (AccessControlException e){
               logAuditEvent(false, "getEncodingStatus", filePath);
               throw e;
             }
-            INode targetNode = getINode(filePath);
+            INode targetNode = iip.getLastINode();
             if (targetNode == null) {
               throw new FileNotFoundException();
             }
@@ -9014,9 +7494,11 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    *    the policy to be used
    * @throws IOException
    */
-  public void addEncodingStatus(final String sourcePath,
+  public void addEncodingStatus(final String sourcePathArg,
       final EncodingPolicy policy, final EncodingStatus.Status status, final boolean checkRetryCache)
       throws IOException {
+    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(sourcePathArg);
+    final String sourcePath = dir.resolvePath(sourcePathArg, pathComponents, dir);
     new HopsTransactionalRequestHandler(HDFSOperationType.ADD_ENCODING_STATUS) {
 
       @Override
@@ -9045,15 +7527,16 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
         boolean success = false;
         try {
           FSPermissionChecker pc = getPermissionChecker();
+          INodesInPath iip = dir.getINodesInPath(sourcePath, true);
           try {
             if (isPermissionEnabled) {
-              checkPathAccess(pc, sourcePath, FsAction.WRITE);
+              dir.checkPathAccess(pc, iip, FsAction.WRITE);
             }
           } catch (AccessControlException e) {
             logAuditEvent(false, "encodeFile", sourcePath);
             throw e;
           }
-          INode target = getINode(sourcePath);
+          INode target = iip.getLastINode();
           EncodingStatus existing = EntityManager.find(
               EncodingStatus.Finder.ByInodeId, target.getId());
           if (existing != null) {
@@ -9140,8 +7623,10 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   /**
    * @see org.apache.hadoop.hdfs.protocol.ClientProtocol#revokeEncoding
    */
-  public void revokeEncoding(final String filePath, short replication)
+  public void revokeEncoding(final String filePathArg, short replication)
       throws IOException {
+    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(filePathArg);
+    final String filePath = dir.resolvePath(filePathArg, pathComponents, dir);
     setReplication(filePath, replication);
     new HopsTransactionalRequestHandler(
         HDFSOperationType.REVOKE_ENCODING_STATUS) {
@@ -9159,15 +7644,16 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       @Override
       public Object performTask() throws IOException {
         FSPermissionChecker pc = getPermissionChecker();
+        INodesInPath iip = dir.getINodesInPath(filePath, true);
         try {
           if (isPermissionEnabled) {
-            checkPathAccess(pc, filePath, FsAction.WRITE);
+            dir.checkPathAccess(pc, iip, FsAction.WRITE);
           }
         } catch (AccessControlException e){
           logAuditEvent(false, "revokeEncoding", filePath);
           throw e;
         }
-        INode targetNode = getINode(filePath);
+        INode targetNode = iip.getLastINode();
         EncodingStatus encodingStatus = EntityManager
             .find(EncodingStatus.Finder.ByInodeId, targetNode.getId());
         encodingStatus.setRevoked(true);
@@ -9234,10 +7720,12 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    *    the parity file name
    * @throws IOException
    */
-  public void updateEncodingStatus(final String sourceFile,
+  public void updateEncodingStatus(final String sourceFileArg,
       final EncodingStatus.Status status,
       final EncodingStatus.ParityStatus parityStatus, final String parityFile)
       throws IOException {
+    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(sourceFileArg);
+    final String sourceFile = dir.resolvePath(sourceFileArg, pathComponents, dir);
     new HopsTransactionalRequestHandler(
         HDFSOperationType.UPDATE_ENCODING_STATUS) {
 
@@ -9277,8 +7765,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       throws UnresolvedLinkException, StorageException,
       TransactionContextException {
     INodesInPath inodesInPath = dir.getINodesInPath4Write(path);
-    INode[] inodes = inodesInPath.getINodes();
-    return inodes[inodes.length - 1];
+    return inodesInPath.getLastINode();
   }
 
   public boolean isErasureCodingEnabled() {
@@ -9288,8 +7775,10 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   /**
    * @see org.apache.hadoop.hdfs.protocol.ClientProtocol#addBlockChecksum
    */
-  public void addBlockChecksum(final String src, final int blockIndex,
+  public void addBlockChecksum(final String srcArg, final int blockIndex,
       final long checksum) throws IOException {
+    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(srcArg);
+    final String src = dir.resolvePath(srcArg, pathComponents, dir);
     new HopsTransactionalRequestHandler(HDFSOperationType.ADD_BLOCK_CHECKSUM) {
       @Override
       public void acquireLock(TransactionLocks locks) throws IOException {
@@ -9303,15 +7792,16 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       @Override
       public Object performTask() throws IOException {
         FSPermissionChecker pc = getPermissionChecker();
+        INodesInPath iip = dir.getINodesInPath(src, true);
         try {
           if (isPermissionEnabled) {
-            checkPathAccess(pc, src, FsAction.WRITE);
+            dir.checkPathAccess(pc, iip, FsAction.WRITE);
           }
         } catch (AccessControlException e){
           logAuditEvent(false, "addBlockChecksum", src);
           throw e;
         }
-        long inodeId = dir.getINode(src).getId();
+        long inodeId = iip.getLastINode().getId();
         BlockChecksum blockChecksum =
             new BlockChecksum(inodeId, blockIndex, checksum);
         EntityManager.add(blockChecksum);
@@ -9323,11 +7813,13 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   /**
    * @see org.apache.hadoop.hdfs.protocol.ClientProtocol#getBlockChecksum
    */
-  public long getBlockChecksum(final String src, final int blockIndex)
+  public long getBlockChecksum(final String srcArg, final int blockIndex)
       throws IOException {
+    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(srcArg);
+    final String src = dir.resolvePath(srcArg, pathComponents, dir);
     return (Long) new HopsTransactionalRequestHandler(
         HDFSOperationType.GET_BLOCK_CHECKSUM) {
-
+          
       @Override
       public void acquireLock(TransactionLocks locks) throws IOException {
         LockFactory lf = LockFactory.getInstance();
@@ -9340,15 +7832,16 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       @Override
       public Object performTask() throws IOException {
         FSPermissionChecker pc = getPermissionChecker();
+        INodesInPath iip = dir.getINodesInPath(src, true);
         try {
           if (isPermissionEnabled) {
-            checkPathAccess(pc, src, FsAction.READ);
+            dir.checkPathAccess(pc, iip, FsAction.READ);
           }
         } catch (AccessControlException e){
           logAuditEvent(false, "getBlockChecksum", src);
           throw e;
         }
-        INode node = dir.getINode(src);
+        INode node = iip.getLastINode();
         BlockChecksumDataAccess.KeyTuple key =
             new BlockChecksumDataAccess.KeyTuple(node.getId(), blockIndex);
         BlockChecksum checksum =
@@ -9363,221 +7856,77 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     }.handle();
   }
 
-
-  void modifyAclEntries(final String srcArg, final List<AclEntry> aclSpec) throws IOException {
-    aclConfigFlag.checkForApiCall();
-    if(isInSafeMode()){
-      throw new SafeModeException("Cannot modify acl entries " + srcArg, safeMode());
-    }
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(srcArg);
-    final String src = dir.resolvePath(srcArg, pathComponents, dir);
-    new HopsTransactionalRequestHandler(HDFSOperationType.MODIFY_ACL_ENTRIES) {
-      @Override
-      public void acquireLock(TransactionLocks locks) throws IOException {
-        LockFactory lf = LockFactory.getInstance();
-        INodeLock il = lf.getINodeLock(INodeLockType.WRITE, INodeResolveType.PATH, src)
-                .setNameNodeID(nameNode.getId())
-                .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes())
-                .skipReadingQuotaAttr(false);
-        locks.add(il);
-        locks.add(lf.getAcesLock());
-      }
-
-      @Override
-      public Object performTask() throws IOException {
-        try {
-          FSPermissionChecker pc = getPermissionChecker();
-          if (isPermissionEnabled) {
-            checkOwner(pc, src);
-          }
-          dir.modifyAclEntries(src, aclSpec);
-        } catch (AccessControlException e) {
-          logAuditEvent(false, "modifyAclEntries", srcArg);
-          throw e;
-        }
-        return null;
-      }
-    }.handle();
+  void modifyAclEntries(final String src, List<AclEntry> aclSpec)
+      throws IOException {
+    HdfsFileStatus auditStat = null;
+    try {
+      checkNameNodeSafeMode("Cannot modify ACL entries on " + src);
+      auditStat = FSDirAclOp.modifyAclEntries(dir, src, aclSpec);
+    } catch (AccessControlException e) {
+      logAuditEvent(false, "modifyAclEntries", src);
+      throw e;
+    } 
+    logAuditEvent(true, "modifyAclEntries", src, null, auditStat);
   }
 
-  void removeAclEntries(final String srcArg, final List<AclEntry> aclSpec) throws IOException {
-    aclConfigFlag.checkForApiCall();
-    if(isInSafeMode()){
-      throw new SafeModeException("Cannot remove acl entries " + srcArg, safeMode());
-    }
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(srcArg);
-    final String src = dir.resolvePath(srcArg, pathComponents, dir);
-    new HopsTransactionalRequestHandler(HDFSOperationType.REMOVE_ACL_ENTRIES) {
-
-      @Override
-      public void acquireLock(TransactionLocks locks) throws IOException {
-        LockFactory lf = LockFactory.getInstance();
-        INodeLock il = lf.getINodeLock(INodeLockType.WRITE, INodeResolveType.PATH, src)
-                .setNameNodeID(nameNode.getId())
-                .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes())
-                .skipReadingQuotaAttr(true);
-        locks.add(il);
-        locks.add(lf.getAcesLock());
-      }
-      @Override
-      public Object performTask() throws IOException {
-        try {
-          FSPermissionChecker pc = getPermissionChecker();
-          if (isPermissionEnabled) {
-            checkPathAccess(pc, src, FsAction.WRITE);
-          }
-          dir.removeAclEntries(src, aclSpec);
-        } catch (AccessControlException e) {
-          logAuditEvent(false, "removeAclEntries", srcArg);
-          throw e;
-        }
-        return null;
-      }
-    }.handle();
+  void removeAclEntries(final String src, List<AclEntry> aclSpec)
+      throws IOException {
+    HdfsFileStatus auditStat = null;
+    try {
+      checkNameNodeSafeMode("Cannot remove ACL entries on " + src);
+      auditStat = FSDirAclOp.removeAclEntries(dir, src, aclSpec);
+    } catch (AccessControlException e) {
+      logAuditEvent(false, "removeAclEntries", src);
+      throw e;
+    } 
+    logAuditEvent(true, "removeAclEntries", src, null, auditStat);
   }
 
-  void removeDefaultAcl(final String srcArg) throws IOException {
-    aclConfigFlag.checkForApiCall();
-    if(isInSafeMode()){
-      throw new SafeModeException("Cannot remove default acl " + srcArg, safeMode());
-    }
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(srcArg);
-    final String src = dir.resolvePath(srcArg, pathComponents, dir);
-    new HopsTransactionalRequestHandler(HDFSOperationType.REMOVE_DEFAULT_ACL) {
-
-      @Override
-      public void acquireLock(TransactionLocks locks) throws IOException {
-        LockFactory lf = LockFactory.getInstance();
-        INodeLock il = lf.getINodeLock(INodeLockType.WRITE, INodeResolveType.PATH, src)
-                .setNameNodeID(nameNode.getId())
-                .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes())
-                .skipReadingQuotaAttr(true);
-        locks.add(il);
-        locks.add(lf.getAcesLock());
-      }
-      @Override
-      public Object performTask() throws IOException {
-        try {
-          FSPermissionChecker pc = getPermissionChecker();
-          if (isPermissionEnabled) {
-            checkPathAccess(pc, src, FsAction.WRITE);
-          }
-          dir.removeDefaultAcl(src);
-        } catch (AccessControlException e) {
-          logAuditEvent(false, "removeDefaultAcl", srcArg);
-          throw e;
-        }
-        return null;
-      }
-    }.handle();
+  void removeDefaultAcl(final String src) throws IOException {
+    HdfsFileStatus auditStat = null;
+    try {
+      checkNameNodeSafeMode("Cannot remove default ACL entries on " + src);
+      auditStat = FSDirAclOp.removeDefaultAcl(dir, src);
+    } catch (AccessControlException e) {
+      logAuditEvent(false, "removeDefaultAcl", src);
+      throw e;
+    } 
+    logAuditEvent(true, "removeDefaultAcl", src, null, auditStat);
   }
 
-  void removeAcl(final String srcArg) throws IOException {
-    aclConfigFlag.checkForApiCall();
-    if(isInSafeMode()){
-      throw new SafeModeException("Cannot remove acl " + srcArg, safeMode());
+  void removeAcl(final String src) throws IOException {
+    HdfsFileStatus auditStat = null;
+    try {
+      checkNameNodeSafeMode("Cannot remove ACL on " + src);
+      auditStat = FSDirAclOp.removeAcl(dir, src);
+    } catch (AccessControlException e) {
+      logAuditEvent(false, "removeAcl", src);
+      throw e;
     }
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(srcArg);
-    final String src = dir.resolvePath(srcArg, pathComponents, dir);
-    new HopsTransactionalRequestHandler(HDFSOperationType.REMOVE_ACL) {
-
-      @Override
-      public void acquireLock(TransactionLocks locks) throws IOException {
-        LockFactory lf = LockFactory.getInstance();
-        INodeLock il = lf.getINodeLock(INodeLockType.WRITE, INodeResolveType.PATH, src)
-                .setNameNodeID(nameNode.getId())
-                .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes())
-                .skipReadingQuotaAttr(true);
-        locks.add(il);
-        locks.add(lf.getAcesLock());
-      }
-      @Override
-      public Object performTask() throws IOException {
-        try {
-          FSPermissionChecker pc = getPermissionChecker();
-          if (isPermissionEnabled) {
-            checkPathAccess(pc, src, FsAction.WRITE);
-          }
-          dir.removeAcl(src);
-        } catch (AccessControlException e) {
-          logAuditEvent(false, "removeAcl", srcArg);
-          throw e;
-        }
-        return null;
-      }
-    }.handle();
+    logAuditEvent(true, "removeAcl", src, null, auditStat);
   }
 
-  void setAcl(final String srcArg, final List<AclEntry> aclSpec) throws IOException {
-    aclConfigFlag.checkForApiCall();
-    if(isInSafeMode()){
-      throw new SafeModeException("Cannot set acl " + srcArg, safeMode());
+  void setAcl(final String src, List<AclEntry> aclSpec) throws IOException {
+    HdfsFileStatus auditStat = null;
+    try {
+      checkNameNodeSafeMode("Cannot set ACL on " + src);
+      auditStat = FSDirAclOp.setAcl(dir, src, aclSpec);
+    } catch (AccessControlException e) {
+      logAuditEvent(false, "setAcl", src);
+      throw e;
     }
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(srcArg);
-    final String src = dir.resolvePath(srcArg, pathComponents, dir);
-    new HopsTransactionalRequestHandler(HDFSOperationType.SET_ACL) {
-      @Override
-      public void acquireLock(TransactionLocks locks) throws IOException {
-        LockFactory lf = LockFactory.getInstance();
-        INodeLock il = lf.getINodeLock(INodeLockType.WRITE, INodeResolveType.PATH, src)
-                .setNameNodeID(nameNode.getId())
-                .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes())
-                .skipReadingQuotaAttr(true);
-        locks.add(il);
-        locks.add(lf.getAcesLock());
-      }
-
-      @Override
-      public Object performTask() throws IOException {
-        try {
-          FSPermissionChecker pc = getPermissionChecker();
-          if (isPermissionEnabled) {
-            checkPathAccess(pc, src, FsAction.WRITE);
-          }
-          dir.setAcl(src, aclSpec);
-        } catch (AccessControlException e) {
-          logAuditEvent(false, "setAcl", srcArg);
-          throw e;
-        }
-        return null;
-      }
-    }.handle();
-
+    logAuditEvent(true, "setAcl", src, null, auditStat);
   }
 
-  AclStatus getAclStatus(final String srcArg) throws IOException {
-    aclConfigFlag.checkForApiCall();
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(srcArg);
-    final String src = dir.resolvePath(srcArg, pathComponents, dir);
-    return (AclStatus) new HopsTransactionalRequestHandler(HDFSOperationType.GET_ACL_STATUS) {
-
-      @Override
-      public void acquireLock(TransactionLocks locks) throws IOException {
-        LockFactory lf = LockFactory.getInstance();
-        INodeLock il = lf.getINodeLock(INodeLockType.READ, INodeResolveType.PATH, src)
-                .setNameNodeID(nameNode.getId())
-                .setActiveNameNodes(nameNode.getActiveNameNodes().getActiveNodes())
-                .skipReadingQuotaAttr(true);
-        locks.add(il);
-        locks.add(lf.getAcesLock());
-      }
-
-      @Override
-      public Object performTask() throws IOException {
-        boolean success = false;
-        try {
-          FSPermissionChecker pc = getPermissionChecker();
-          if (isPermissionEnabled) {
-            checkPathAccess(pc, src, FsAction.READ);
-          }
-          final AclStatus ret = dir.getAclStatus(src);
-          success = true;
-          return ret;
-        } finally {
-          logAuditEvent(success, "getAclStatus", src);
-        }
-      }
-    }.handle();
+  AclStatus getAclStatus(String src) throws IOException {
+    boolean success = false;
+    try {
+      final AclStatus ret = FSDirAclOp.getAclStatus(dir, src);
+      success = true;
+      return ret;
+    } finally {
+      logAuditEvent(success, "getAclStatus", src);
+    }
   }
 
   /**
@@ -9687,19 +8036,17 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
           @Override
           public Object performTask() throws IOException {
             FSPermissionChecker pc = getPermissionChecker();
+            byte[][] pathComponents = INode.getPathComponents(path);
+            INodesInPath iip = dir.getExistingPathINodes(pathComponents);
             if (isPermissionEnabled && !pc.isSuperUser()) {
-              pc.checkPermission(path, dir, doCheckOwner,
-                  ancestorAccess, parentAccess, access, subAccess, false, true);
+              dir.checkPermission(pc, iip, doCheckOwner, ancestorAccess, parentAccess, access, subAccess, false);
             }
 
-            byte[][] pathComponents = INode.getPathComponents(path);
             boolean isDir = false;
             INode.DirCounts srcCounts = new INode.DirCounts();
-            INodesInPath dstInodesInPath = dir.getExistingPathINodes(pathComponents);
-            final INode[] pathInodes = dstInodesInPath.getINodes();
 
             INodeAttributes quotaDirAttributes = null;
-            INode leafInode = pathInodes[pathInodes.length - 1];
+            INode leafInode = iip.getLastINode();
             if(leafInode != null){  // complete path resolved
               if(leafInode instanceof INodeFile ){
                 isDir = false;
@@ -9718,16 +8065,16 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
             }
 
             //Get acls
-            List[] acls = new List[pathInodes.length];
-            for (int i = 0; i < pathInodes.length ; i++){
-              if (pathInodes[i] != null){
-                AclFeature aclFeature = INodeAclHelper.getAclFeature(pathInodes[i]);
+            List[] acls = new List[iip.length()];
+            for (int i = 0; i < iip.length() ; i++){
+              if (iip.getINode(i) != null){
+                AclFeature aclFeature = INodeAclHelper.getAclFeature(iip.getINode(i));
                 acls[i] = aclFeature != null ? aclFeature.getEntries() : null;
               }
             }
 
             return new PathInformation(path, pathComponents,
-                pathInodes,dstInodesInPath.getNumNonNull(),isDir,
+                iip,isDir,
                 srcCounts.getNsCount(), srcCounts.getDsCount(), quotaDirAttributes, acls);
           }
         };
@@ -9798,9 +8145,9 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   }
 
 
-  void checkAccess(final String src1, final FsAction mode) throws IOException {
-    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src1);
-    final String src = dir.resolvePath(src1, pathComponents, dir);
+  void checkAccess(final String srcArg, final FsAction mode) throws IOException {
+    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(srcArg);
+    final String src = dir.resolvePath(srcArg, pathComponents, dir);
     HopsTransactionalRequestHandler checkAccessHandler =
         new HopsTransactionalRequestHandler(HDFSOperationType.CHECK_ACCESS,
             src) {
@@ -9818,13 +8165,14 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
           @Override
           public Object performTask() throws IOException {
             FSPermissionChecker pc = getPermissionChecker();
+            INodesInPath iip = dir.getINodesInPath(src, true);
             try {
-              INode inode = getINode(src);
+              INode inode = iip.getLastINode();
               if (inode == null) {
                 throw new FileNotFoundException("Path not found");
               }
               if (isPermissionEnabled) {
-                checkPermission(pc, src, false, null, null, mode, null);
+                dir.checkPathAccess(pc, iip, mode);
               }
             } catch (AccessControlException e) {
               logAuditEvent(false, "checkAccess", src);
@@ -9886,7 +8234,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
 
   }
 
-  private CacheEntry retryCacheWaitForCompletionTransactional() throws IOException {
+  CacheEntry retryCacheWaitForCompletionTransactional() throws IOException {
     if(!isRetryCacheEnabled){
       return null;
     }
@@ -9906,7 +8254,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     return (CacheEntry) rh.handle(this);
   }
 
-  private CacheEntry retryCacheSetStateTransactional(final CacheEntry cacheEntry, final boolean ret) throws IOException {
+  CacheEntry retryCacheSetStateTransactional(final CacheEntry cacheEntry, final boolean ret) throws IOException {
     if(!isRetryCacheEnabled){
       return null;
     }
@@ -10080,7 +8428,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     return isTestingSTO;
   }
 
-  private Times saveTimes(){
+  public Times saveTimes(){
     if(isTestingSTO) {
       delays.remove();
       Times times = new Times(delayBeforeSTOFlag, delayAfterBuildingTree);

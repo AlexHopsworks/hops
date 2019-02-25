@@ -1975,15 +1975,24 @@ public class PBHelper {
 
   public static AclStatus convert(GetAclStatusResponseProto e) {
     AclStatusProto r = e.getResult();
-    return new AclStatus.Builder().owner(r.getOwner()).group(r.getGroup())
-        .stickyBit(r.getSticky())
-        .addEntries(convertAclEntry(r.getEntriesList())).build();
+    AclStatus.Builder builder = new AclStatus.Builder();
+    builder.owner(r.getOwner()).group(r.getGroup()).stickyBit(r.getSticky())
+        .addEntries(convertAclEntry(r.getEntriesList()));
+    if (r.hasPermission()) {
+      builder.setPermission(convert(r.getPermission()));
+    }
+    return builder.build();
   }
 
   public static GetAclStatusResponseProto convert(AclStatus e) {
-    AclStatusProto r = AclStatusProto.newBuilder().setOwner(e.getOwner())
+    AclStatusProto.Builder builder = AclStatusProto.newBuilder();
+    builder.setOwner(e.getOwner())
         .setGroup(e.getGroup()).setSticky(e.isStickyBit())
-        .addAllEntries(convertAclEntryProto(e.getEntries())).build();
+        .addAllEntries(convertAclEntryProto(e.getEntries()));
+    if (e.getPermission() != null) {
+      builder.setPermission(convert(e.getPermission()));
+    }
+    AclStatusProto r = builder.build();
     return GetAclStatusResponseProto.newBuilder().setResult(r).build();
   }
 
@@ -2026,7 +2035,8 @@ public class PBHelper {
   public static ActiveNode convert(ActiveNodeProto p) {
     ActiveNode an =
         new ActiveNodePBImpl(p.getId(), p.getRpcHostname(), p.getRpcIpAddress(),
-            p.getRpcPort(), p.getHttpAddress(), p.getServiceIpAddress(), p.getServicePort());
+            p.getRpcPort(), p.getHttpAddress(), p.getServiceIpAddress(),
+            p.getServicePort(), p.getLocationDomainId());
     return an;
   }
 
@@ -2163,33 +2173,29 @@ public class PBHelper {
   }
   
   public static DatanodeProtocolProtos.BlockReportProto convert(BlockReport report) {
-   
+
     List<DatanodeProtocolProtos.BlockReportBucketProto> bucketProtos = new
-        ArrayList<>();
-    for (Bucket bucket : report.getBuckets()){
-  
+            ArrayList<>();
+    for (Bucket bucket : report.getBuckets()) {
       DatanodeProtocolProtos.BlockReportBucketProto.Builder bucketBuilder =
-          DatanodeProtocolProtos.BlockReportBucketProto.newBuilder();
-      for (ReportedBlock block : bucket.getBlocks()){
+              DatanodeProtocolProtos.BlockReportBucketProto.newBuilder();
+
+      bucketBuilder.setHash(ByteString.copyFrom(bucket.getHash()));
+
+      for (ReportedBlock block : bucket.getBlocks()) {
         bucketBuilder.addBlocks(
-            DatanodeProtocolProtos.BlockReportBlockProto.newBuilder()
-                .setBlockId(block.getBlockId())
-                .setGenerationStamp(block.getGenerationStamp())
-                .setLength(block.getLength())
-                .setState(convert(block.getState())));
+                DatanodeProtocolProtos.BlockReportBlockProto.newBuilder()
+                        .setBlockId(block.getBlockId())
+                        .setGenerationStamp(block.getGenerationStamp())
+                        .setLength(block.getLength())
+                        .setState(convert(block.getState())));
       }
+
       bucketProtos.add(bucketBuilder.build());
     }
-  
-    List<Long> hashes = new ArrayList<>();
-    for (long hash : report.getHashes()){
-      hashes.add(hash);
-    }
-    
+
     return DatanodeProtocolProtos.BlockReportProto.newBuilder()
-        .addAllBuckets(bucketProtos)
-        .addAllHashes(hashes)
-        .build();
+            .addAllBuckets(bucketProtos).build();
   }
   
   private static DatanodeProtocolProtos.BlockReportBlockProto.BlockReportBlockStateProto convert(BlockReportBlockState
@@ -2240,11 +2246,11 @@ public class PBHelper {
       
       Bucket bucket = new Bucket();
       bucket.setBlocks(blocks);
+      bucket.setHash(bucketProto.getHash().toByteArray());
       buckets[i] = bucket;
-      hashes[i] = blockReportProto.getHashes(i);
     }
     
-    return new BlockReport(buckets, hashes, numBlocks);
+    return new BlockReport(buckets, numBlocks);
   }
   
   private static BlockReportBlockState convert(

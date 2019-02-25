@@ -290,7 +290,7 @@ public class NamenodeFsck implements DataEncryptionKeyFactory {
           NumberReplicas numberReplicas = bm.countNodes(block);
           out.println("Block Id: " + blockId);
           out.println("Block belongs to: " + iNode.getFullPathName());
-          out.println("No. of Expected Replica: " + bc.getFileReplication());
+          out.println("No. of Expected Replica: " + bc.getBlockReplication());
           out.println("No. of live Replica: " + numberReplicas.liveReplicas());
           out.println("No. of excess Replica: " + numberReplicas.excessReplicas());
           out.println("No. of stale Replica: " + numberReplicas.replicasOnStaleNodes());
@@ -480,10 +480,10 @@ public class NamenodeFsck implements DataEncryptionKeyFactory {
     long fileLen = file.getLen();
     // Get block locations without updating the file access time 
     // and without block access tokens
-    LocatedBlocks blocks;
+    LocatedBlocks blocks = null;
+    FSNamesystem fsn = namenode.getNamesystem();
     try {
-      blocks = namenode.getNamesystem().getBlockLocations(path, 0,
-          fileLen, false, false, false);
+      blocks = fsn.getBlockLocations(path, 0, fileLen, false, false).blocks;
     } catch (FileNotFoundException fnfe) {
       blocks = null;
     }
@@ -721,10 +721,6 @@ public class NamenodeFsck implements DataEncryptionKeyFactory {
         }
         if (fos == null) {
           fos = dfs.create(target + "/" + chain, true);
-          if (fos == null) {
-            throw new IOException("Failed to copy " + fullName +
-                " to /lost+found: could not store chain " + chain);
-          }
           chain++;
         }
         

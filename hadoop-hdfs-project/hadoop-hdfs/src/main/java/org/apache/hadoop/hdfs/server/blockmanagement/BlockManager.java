@@ -1277,20 +1277,6 @@ public class BlockManager {
             HashBuckets.getInstance().resetBuckets(storageInfo.getSid());
           }
 
-          // If the DN hasn't block-reported since the most recent
-          // failover, then we may have been holding up on processing
-          // over-replicated blocks because of it. But we can now
-          // process those blocks.
-          boolean stale = false;
-          for (DatanodeStorageInfo storage : node.getStorageInfos()) {
-            if (storage.areBlockContentsStale()) {
-              stale = true;
-              break;
-            }
-          }
-          if (stale) {
-            rescanPostponedMisreplicatedBlocks();
-          }
           return null;
         } catch (Throwable t) {
           LOG.error(t);
@@ -1542,12 +1528,12 @@ public class BlockManager {
 
     NumberReplicas numberOfReplicas = countNodes(b.stored);
     boolean hasEnoughLiveReplicas = numberOfReplicas.liveReplicas() >= bc
-        .getFileReplication();
+        .getBlockReplication();
     boolean minReplicationSatisfied =
         numberOfReplicas.liveReplicas() >= minReplication;
     boolean hasMoreCorruptReplicas = minReplicationSatisfied &&
         (numberOfReplicas.liveReplicas() + numberOfReplicas.corruptReplicas()) >
-            bc.getFileReplication();
+            bc.getBlockReplication();
     boolean corruptedDuringWrite = minReplicationSatisfied &&
         (b.stored.getGenerationStamp() > b.corrupted.getGenerationStamp());
     // case 1: have enough number of live replicas
@@ -1756,7 +1742,7 @@ public class BlockManager {
         return scheduledWork;
       }
 
-      requiredReplication = bc.getFileReplication();
+      requiredReplication = bc.getBlockReplication();
 
       // get a source data-node
       containingNodes = new ArrayList<>();
@@ -1834,7 +1820,7 @@ public class BlockManager {
           neededReplications.decrementReplicationIndex(priority);
           continue;
         }
-        requiredReplication = bc.getFileReplication();
+        requiredReplication = bc.getBlockReplication();
 
         // do not schedule more if enough replicas is already pending
         NumberReplicas numReplicas = countNodes(block);
@@ -2229,16 +2215,7 @@ public class BlockManager {
       // Get the storageinfo object that we are updating in this processreport
       reportStatistics = processReport(storageInfo, newReport);
 
-      // Now that we have an up-to-date block report, we know that any
-      // deletions from a previous NN iteration have been accounted for.
-      boolean staleBefore = storageInfo.areBlockContentsStale();
       storageInfo.receivedBlockReport();
-      if (staleBefore && !storageInfo.areBlockContentsStale()) {
-        LOG.info(
-            "BLOCK* processReport: Received first block report from " + node
-            + " after becoming active. Its block contents are no longer" + " considered stale");
-        rescanPostponedMisreplicatedBlocks();
-      }
 
       final long endTime = Time.now();
 
@@ -2263,9 +2240,44 @@ public class BlockManager {
   /**
    * Rescan the list of blocks which were previously postponed.
    */
-  private void rescanPostponedMisreplicatedBlocks() throws IOException {
-    HopsTransactionalRequestHandler rescanPostponedMisreplicatedBlocksHandler =
-        new HopsTransactionalRequestHandler(
+  void rescanPostponedMisreplicatedBlocks() throws IOException {
+    if (getPostponedMisreplicatedBlocksCount() == 0) {
+      return;
+    }
+
+    long startTimeRescanPostponedMisReplicatedBlocks = Time.now();
+    long startPostponedMisReplicatedBlocksCount = getPostponedMisreplicatedBlocksCount();
+    try {
+      // blocksPerRescan is the configured number of blocks per rescan.
+      // Randomly select blocksPerRescan consecutive blocks from the HashSet
+      // when the number of blocks remaining is larger than blocksPerRescan.
+      // The reason we don't always pick the first blocksPerRescan blocks is to
+      // handle the case if for some reason some datanodes remain in
+      // content stale state for a long time and only impact the first
+      // blocksPerRescan blocks.
+      int i = 0;
+      long startIndex = 0;
+      long blocksPerRescan = datanodeManager.getBlocksPerPostponedMisreplicatedBlocksRescan();
+      long base = getPostponedMisreplicatedBlocksCount() - blocksPerRescan;
+      if (base > 0) {
+        startIndex = DFSUtil.getRandom().nextLong() % (base + 1);
+        if (startIndex < 0) {
+          startIndex += (base + 1);
+        }
+      }
+
+      Iterator<Block> it = postponedMisreplicatedBlocks.iterator();
+      for (int tmp = 0; tmp < startIndex; tmp++) {
+        it.next();
+      }
+      final Set<Block> toRemove = new HashSet<>();
+      for (; it.hasNext(); i++) {
+        Block b = it.next();
+        if (i >= blocksPerRescan) {
+          break;
+        }
+
+        HopsTransactionalRequestHandler rescanPostponedMisreplicatedBlocksHandler = new HopsTransactionalRequestHandler(
             HDFSOperationType.RESCAN_MISREPLICATED_BLOCKS) {
           INodeIdentifier inodeIdentifier;
 
@@ -2289,14 +2301,12 @@ public class BlockManager {
           @Override
           public Object performTask() throws IOException {
             Block b = (Block) getParams()[0];
-            Set<Block> toRemoveSet = (Set<Block>) getParams()[1];
-
             BlockInfo bi = blocksMap.getStoredBlock(b);
+            Set<Block> toRemoveSet = (Set<Block>) getParams()[1];
             if (bi == null) {
               if (LOG.isDebugEnabled()) {
-                LOG.debug("BLOCK* rescanPostponedMisreplicatedBlocks: " +
-                    "Postponed mis-replicated block " + b +
-                    " no longer found " + "in block map.");
+                LOG.debug("BLOCK* rescanPostponedMisreplicatedBlocks: " + "Postponed mis-replicated block " + b
+                    + " no longer found " + "in block map.");
               }
               toRemoveSet.add(b);
               postponedMisreplicatedBlocksCount.decrementAndGet();
@@ -2304,8 +2314,7 @@ public class BlockManager {
             }
             MisReplicationResult res = processMisReplicatedBlock(bi);
             if (LOG.isDebugEnabled()) {
-              LOG.debug("BLOCK* rescanPostponedMisreplicatedBlocks: " +
-                  "Re-scanned block " + b + ", result is " + res);
+              LOG.debug("BLOCK* rescanPostponedMisreplicatedBlocks: " + "Re-scanned block " + b + ", result is " + res);
             }
             if (res != MisReplicationResult.POSTPONE) {
               toRemoveSet.add(b);
@@ -2315,13 +2324,18 @@ public class BlockManager {
           }
         };
 
-    final Set<Block> toRemove = new HashSet<>();
-    for (Block postponedMisreplicatedBlock : postponedMisreplicatedBlocks) {
-      rescanPostponedMisreplicatedBlocksHandler
-          .setParams(postponedMisreplicatedBlock, toRemove);
-      rescanPostponedMisreplicatedBlocksHandler.handle(namesystem);
+        rescanPostponedMisreplicatedBlocksHandler
+            .setParams(b, toRemove);
+        rescanPostponedMisreplicatedBlocksHandler.handle(namesystem);
+      }
+      postponedMisreplicatedBlocks.removeAll(toRemove);
+    } finally {
+      long endPostponedMisReplicatedBlocksCount = getPostponedMisreplicatedBlocksCount();
+      LOG.info("Rescan of postponedMisreplicatedBlocks completed in " + (Time.now()
+          - startTimeRescanPostponedMisReplicatedBlocks) + " msecs. " + endPostponedMisReplicatedBlocksCount
+          + " blocks are left. " + (startPostponedMisReplicatedBlocksCount - endPostponedMisReplicatedBlocksCount)
+          + " blocks are removed.");
     }
-    postponedMisreplicatedBlocks.removeAll(toRemove);
   }
 
   @VisibleForTesting
@@ -2563,8 +2577,8 @@ public class BlockManager {
     
     if(LOG.isDebugEnabled()){
       LOG.debug(String.format("%d/%d reported hashes matched",
-          newReport.getHashes().length-matchingResult.mismatchedBuckets.size(),
-          newReport.getHashes().length));
+          newReport.getBuckets().length-matchingResult.mismatchedBuckets.size(),
+          newReport.getBuckets().length));
     }
     
     final Set<Long> aggregatedSafeBlocks = new HashSet<>();
@@ -2686,7 +2700,7 @@ public class BlockManager {
       @Override
       public Object performTask() throws IOException {
         // scan the report and process newly reported blocks
-        long hash = 0; // Our updated hash should only consider
+        byte[] hash = HashBuckets.initalizeHash(); // Our updated hash should only consider
         // finalized, stored blocks
         for (ReportedBlock brb : reportedBlocks) {
           Block block = new Block();
@@ -2707,7 +2721,7 @@ public class BlockManager {
               // Only update hash with blocks that should not
               // be removed and are finalized. This helps catch excess
               // replicas as well.
-              hash += BlockReport.hashAsFinalized(brb);
+              HashBuckets.XORHashes(hash, BlockReport.hashAsFinalized(brb));
             }
           }
         }
@@ -2755,13 +2769,14 @@ public class BlockManager {
         continue;
       }
       
-      long storedHash = storedHashesMap.get(i).getHash();
+      byte[] storedHash = storedHashesMap.get(i).getHash();
       
       //First block report, or report in safe mode, should always process complete report.
       if (firstBlockReport) {
         //if the bucket is empty there is nothing to process 
         //except if the namenode think that there should be things in the bucket
-        if (report.getBuckets()[i].getBlocks().length == 0 && storedHash == 0) {
+        if (report.getBuckets()[i].getBlocks().length == 0
+                && HashBuckets.hashEquals(storedHash, HashBuckets.initalizeHash())) {
           matchedBuckets.add(i);
           continue;
         }
@@ -2769,16 +2784,16 @@ public class BlockManager {
         continue;
       }
 
-      long reportedHash = report.getHashes()[i];
+      byte[] reportedHash = report.getBuckets()[i].getHash();
 
-      if (storedHash == reportedHash){
+      if (HashBuckets.hashEquals(storedHash, reportedHash)){
         matchedBuckets.add(i);
       } else {
         mismatchedBuckets.add(i);
       }
     }
 
-    assert matchedBuckets.size() + mismatchedBuckets.size() == report.getHashes().length;
+    assert matchedBuckets.size() + mismatchedBuckets.size() == report.getBuckets().length;
     return new HashMatchingResult(matchedBuckets, mismatchedBuckets);
   }
   
@@ -3208,7 +3223,7 @@ public class BlockManager {
     }
 
     // handle underReplication/overReplication
-    short fileReplication = bc.getFileReplication();
+    short fileReplication = bc.getBlockReplication();
     if (!isNeededReplication(storedBlock, fileReplication, numCurrentReplica)) {
       neededReplications
           .remove(storedBlock, numCurrentReplica, num.decommissionedReplicas(),
@@ -3716,7 +3731,7 @@ public class BlockManager {
       return MisReplicationResult.UNDER_CONSTRUCTION;
     }
     // calculate current replication
-    short expectedReplication = bc.getFileReplication();
+    short expectedReplication = bc.getBlockReplication();
     NumberReplicas num = countNodes(block);
     int numCurrentReplica = num.liveReplicas();
     // add to under-replicated queue if need to be
@@ -4541,7 +4556,7 @@ public class BlockManager {
                 for (long blockId : inodeIdsToBlockMap.get(identifier.getInodeId())) {
                   BlockInfo block = EntityManager.find(BlockInfo.Finder.ByBlockIdAndINodeId, blockId);
                   BlockCollection bc = blocksMap.getBlockCollection(block);
-                  short expectedReplication = bc.getFileReplication();
+                  short expectedReplication = bc.getBlockReplication();
                   NumberReplicas num = countNodes(block);
                   int numCurrentReplica = num.liveReplicas();
                   if (numCurrentReplica > expectedReplication) {
@@ -4770,7 +4785,7 @@ public class BlockManager {
    */
   public void checkReplication(BlockCollection bc)
       throws IOException {
-    final short expected = bc.getFileReplication();
+    final short expected = bc.getBlockReplication();
     for (Block block : bc.getBlocks()) {
       final NumberReplicas n = countNodes(block);
       if (isNeededReplication(block, expected, n.liveReplicas())) {
@@ -4789,7 +4804,7 @@ public class BlockManager {
   private int getReplication(Block block)
       throws StorageException, TransactionContextException {
     final BlockCollection bc = blocksMap.getBlockCollection(block);
-    return bc == null ? 0 : bc.getFileReplication();
+    return bc == null ? 0 : bc.getBlockReplication();
   }
 
 
@@ -4979,6 +4994,7 @@ public class BlockManager {
             if (namesystem.isPopulatingReplQueues()) {
               computeDatanodeWork();
               processPendingReplications();
+              rescanPostponedMisreplicatedBlocks();
             }
           } else {
             updateState();
@@ -4987,6 +5003,10 @@ public class BlockManager {
           Thread.sleep(replicationRecheckInterval);
         } catch (Throwable t) {
           if(t instanceof TransientStorageException){
+            continue;
+          }
+          if(t instanceof StorageException){
+            //Storage problems should be handled by FSNameSystem.checkAvailableResources(), retry
             continue;
           }
           if (!namesystem.isRunning()) {
@@ -5051,8 +5071,10 @@ public class BlockManager {
     excessReplicateMap.clear();
     invalidateBlocks.clear();
     datanodeManager.clearPendingQueues();
-  }
-
+    postponedMisreplicatedBlocks.clear();
+    postponedMisreplicatedBlocksCount.set(0);
+  };
+  
   private static class ReplicationWork {
 
     private final Block block;

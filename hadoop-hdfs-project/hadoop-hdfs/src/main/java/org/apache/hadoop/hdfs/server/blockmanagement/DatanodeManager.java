@@ -174,14 +174,17 @@ public class DatanodeManager {
    * writing to stale datanodes, i.e., continue using stale nodes for writing.
    */
   private final float ratioUseStaleDataNodesForWrite;
-  
-  /**
-   * The number of stale DataNodes
-   */
+
+  /** The number of stale DataNodes */
   private volatile int numStaleNodes;
 
   /** The number of stale storages */
   private volatile int numStaleStorages;
+
+  /**
+   * Number of blocks to check for each postponedMisreplicatedBlocks iteration
+   */
+  private final long blocksPerPostponedMisreplicatedBlocksRescan;
 
   /**
    * Whether or not this cluster has ever consisted of more than 1 rack,
@@ -304,6 +307,9 @@ public class DatanodeManager {
     this.timeBetweenResendingCachingDirectivesMs = conf.getLong(
         DFSConfigKeys.DFS_NAMENODE_PATH_BASED_CACHE_RETRY_INTERVAL_MS,
         DFSConfigKeys.DFS_NAMENODE_PATH_BASED_CACHE_RETRY_INTERVAL_MS_DEFAULT);
+    this.blocksPerPostponedMisreplicatedBlocksRescan = conf.getLong(
+        DFSConfigKeys.DFS_NAMENODE_BLOCKS_PER_POSTPONEDBLOCKS_RESCAN_KEY,
+        DFSConfigKeys.DFS_NAMENODE_BLOCKS_PER_POSTPONEDBLOCKS_RESCAN_KEY_DEFAULT);
   }
 
   private static long getStaleIntervalFromConf(Configuration conf,
@@ -998,16 +1004,10 @@ public class DatanodeManager {
    * @return list of datanodes where decommissioning is in progress.
    */
   public List<DatanodeDescriptor> getDecommissioningNodes() {
-    final List<DatanodeDescriptor> decommissioningNodes =
-        new ArrayList<>();
-    final List<DatanodeDescriptor> results =
-        getDatanodeListForReport(DatanodeReportType.LIVE);
-    for (DatanodeDescriptor node : results) {
-      if (node.isDecommissionInProgress()) {
-        decommissioningNodes.add(node);
-      }
-    }
-    return decommissioningNodes;
+    // There is no need to take namesystem reader lock as
+    // getDatanodeListForReport will synchronize on datanodeMap
+    // A decommissioning DN may be "alive" or "dead".
+    return getDatanodeListForReport(DatanodeReportType.DECOMMISSIONING);
   }
   
   /* Getter and Setter for stale DataNodes related attributes */
@@ -1025,6 +1025,10 @@ public class DatanodeManager {
     return avoidStaleDataNodesForWrite && (numStaleNodes <=
         heartbeatManager.getLiveDatanodeCount() *
             ratioUseStaleDataNodesForWrite);
+  }
+
+  public long getBlocksPerPostponedMisreplicatedBlocksRescan() {
+    return blocksPerPostponedMisreplicatedBlocksRescan;
   }
 
   /**

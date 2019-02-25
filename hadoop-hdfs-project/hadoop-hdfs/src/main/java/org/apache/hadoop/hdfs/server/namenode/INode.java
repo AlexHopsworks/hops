@@ -29,6 +29,14 @@ import io.hops.metadata.hdfs.entity.MetadataLogEntry;
 import io.hops.metadata.hdfs.entity.ProvenanceLogEntry;
 import io.hops.transaction.EntityManager;
 import java.io.FileNotFoundException;
+import java.io.PrintStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.nio.charset.Charset;
+import java.util.List;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.fs.ContentSummary;
 import org.apache.hadoop.fs.Path;
@@ -710,7 +718,7 @@ public abstract class INode implements Comparable<byte[]>, LinkedElement {
   public abstract void setAccessTime(long atime)
       throws TransactionContextException, StorageException;
 
-  public void setBlockStoragePolicyID(byte blockStoragePolicyID)
+  public void setStoragePolicyID(byte blockStoragePolicyID)
       throws TransactionContextException, StorageException {
     setBlockStoragePolicyIDNoPersistance(blockStoragePolicyID);
     save();
@@ -937,6 +945,11 @@ public abstract class INode implements Comparable<byte[]>, LinkedElement {
     final StringWriter out = new StringWriter();
     dumpTreeRecursively(new PrintWriter(out, true), new StringBuilder());
     return out.getBuffer();
+  }
+
+  @VisibleForTesting
+  public final void dumpTreeRecursively(PrintStream out) throws StorageException, TransactionContextException {
+    out.println(dumpTreeRecursively().toString());
   }
 
   /**

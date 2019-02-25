@@ -77,7 +77,14 @@ class FSPermissionChecker {
 
   /** @return a string for throwing {@link AccessControlException} */
   private String toAccessControlString(INode inode,
-      FsAction access, FsPermission mode, List<AclEntry> featureEntries) throws IOException {
+      FsAction access, FsPermission mode, List<AclEntry> featureEntries) throws TransactionContextException, IOException {
+    return toAccessControlString(inode, access, mode, featureEntries, false);
+  }
+
+  /** @return a string for throwing {@link AccessControlException} */
+  private String toAccessControlString(INode inode, FsAction access,
+      FsPermission mode, List<AclEntry> featureEntries, boolean deniedFromAcl) throws StorageException,
+      TransactionContextException, IOException {
     StringBuilder sb = new StringBuilder("Permission denied: ")
       .append("user=").append(user).append(", ")
       .append("access=").append(access).append(", ")
@@ -89,11 +96,14 @@ class FSPermissionChecker {
     if (featureEntries != null) {
       sb.append(':').append(StringUtils.join(",", featureEntries));
     }
+    if (deniedFromAcl) {
+      sb.append("+");
+    }
     return sb.toString();
   }
   
   private String toAccessControlString(ProjectedINode inode,
-      FsAction access, FsPermission mode, List<AclEntry> featureEntries) throws IOException {
+      FsAction access, FsPermission mode, List<AclEntry> featureEntries, boolean deniedFromAcl) throws IOException {
     StringBuilder sb = new StringBuilder("Permission denied: ")
         .append("user=").append(user).append(", ")
         .append("access=").append(access).append(", ")
@@ -105,23 +115,22 @@ class FSPermissionChecker {
     if (featureEntries != null) {
       sb.append(':').append(StringUtils.join(",", featureEntries));
     }
+    if (deniedFromAcl) {
+      sb.append("+");
+    }
     return sb.toString();
   }
 
-  private final UserGroupInformation ugi;
   private final String user;
-  /**
-   * A set with group namess. Not synchronized since it is unmodifiable
-   */
+  /** A set with group namess. Not synchronized since it is unmodifiable */
   private final Set<String> groups;
   private final boolean isSuper;
   
   FSPermissionChecker(String fsOwner, String supergroup,
       UserGroupInformation callerUgi) {
-    ugi = callerUgi;
-    HashSet<String> s = new HashSet<>(Arrays.asList(ugi.getGroupNames()));
+    HashSet<String> s = new HashSet<String>(Arrays.asList(callerUgi.getGroupNames()));
     groups = Collections.unmodifiableSet(s);
-    user = ugi.getShortUserName();
+    user = callerUgi.getShortUserName();
     isSuper = user.equals(fsOwner) || groups.contains(supergroup);
   }
 
@@ -173,62 +182,62 @@ class FSPermissionChecker {
    * Further, if both foo and bar do not exist,
    * then the ancestor path is "/".
    *
-   * @param doCheckOwner
-   *     Require user to be the owner of the path?
-   * @param ancestorAccess
-   *     The access required by the ancestor of the path.
-   * @param parentAccess
-   *     The access required by the parent of the path.
-   * @param access
-   *     The access required by the path.
-   * @param subAccess
-   *     If path is a directory,
-   *     it is the access required of the path and all the sub-directories.
-   *     If path is not a directory, there is no effect.
+   * @param doCheckOwner Require user to be the owner of the path?
+   * @param ancestorAccess The access required by the ancestor of the path.
+   * @param parentAccess The access required by the parent of the path.
+   * @param access The access required by the path.
+   * @param subAccess If path is a directory,
+   * it is the access required of the path and all the sub-directories.
+   * If path is not a directory, there is no effect.
+   * @param ignoreEmptyDir Ignore permission checking for empty directory?
    * @throws AccessControlException
-   * @throws UnresolvedLinkException
-   *     Guarded by {@link FSNamesystem#readLock()}
-   *     Caller of this method must hold that lock.
+   * 
+   * Guarded by {@link FSNamesystem#readLock()}
+   * Caller of this method must hold that lock.
    */
-  void checkPermission(String path, FSDirectory dir, boolean doCheckOwner,
+  void checkPermission(INodesInPath inodesInPath, boolean doCheckOwner,
       FsAction ancestorAccess, FsAction parentAccess, FsAction access,
-      FsAction subAccess, boolean ignoreEmptyDir, boolean resolveLink) throws AccessControlException,
-      UnresolvedLinkException, StorageException,
-      TransactionContextException, IOException {
+      FsAction subAccess, boolean ignoreEmptyDir) throws AccessControlException,
+      StorageException, TransactionContextException, IOException {
     if (LOG.isDebugEnabled()) {
-      LOG.debug("ACCESS CHECK: " + this + ", doCheckOwner=" + doCheckOwner +
-          ", ancestorAccess=" + ancestorAccess + ", parentAccess=" +
-          parentAccess + ", access=" + access + ", subAccess=" + subAccess + ", ignoreEmptyDir="
-          + ignoreEmptyDir + ", resolveLink=" + resolveLink);
+      LOG.debug("ACCESS CHECK: " + this
+          + ", doCheckOwner=" + doCheckOwner
+          + ", ancestorAccess=" + ancestorAccess
+          + ", parentAccess=" + parentAccess
+          + ", access=" + access
+          + ", subAccess=" + subAccess
+          + ", ignoreEmptyDir=" + ignoreEmptyDir);
     }
     // check if (parentAccess != null) && file exists, then check sb
     // If resolveLink, the check is performed on the link target.
-      final INode[] inodes = dir.getINodesInPath(path, resolveLink).getINodes();
-      int ancestorIndex = inodes.length - 2;
-      for(; ancestorIndex >= 0 && inodes[ancestorIndex] == null;
-          ancestorIndex--);
-      checkTraverse(inodes, ancestorIndex);
+    final int length = inodesInPath.length();
+    final INode last = length > 0 ? inodesInPath.getLastINode() : null;
+    final INode parent = length > 1 ? inodesInPath.getINode(-2) : null;
 
-      final INode last = inodes[inodes.length - 1];
-      if (parentAccess != null && parentAccess.implies(FsAction.WRITE)
-          && inodes.length > 1 && last != null) {
-        checkStickyBit(inodes[inodes.length - 2], last);
-      }
-      if (ancestorAccess != null && inodes.length > 1) {
-        check(inodes, ancestorIndex, ancestorAccess);
-      }
-      if (parentAccess != null && inodes.length > 1) {
-        check(inodes, inodes.length - 2, parentAccess);
-      }
-      if (access != null) {
-        check(last, access);
-      }
-      if (subAccess != null) {
-        checkSubAccess(last, subAccess, ignoreEmptyDir);
-      }
-      if (doCheckOwner) {
-        checkOwner(last);
-      }
+    checkTraverse(inodesInPath);
+
+    if (parentAccess != null && parentAccess.implies(FsAction.WRITE)
+        && length > 1 && last != null) {
+      checkStickyBit(parent, last);
+    }
+    if (ancestorAccess != null && length > 1) {
+      List<INode> inodes = inodesInPath.getReadOnlyINodes();
+      INode ancestor = null;
+      for (int i = inodes.size() - 2; i >= 0 && (ancestor = inodes.get(i)) == null; i--);
+      check(ancestor, ancestorAccess);
+    }
+    if (parentAccess != null && length > 1 && parent != null) {
+      check(parent, parentAccess);
+    }
+    if (access != null) {
+      check(last, access);
+    }
+    if (subAccess != null) {
+      checkSubAccess(last, subAccess, ignoreEmptyDir);
+    }
+    if (doCheckOwner) {
+      checkOwner(last);
+    }
   }
 
   void checkPermission(INode subtreeRoot, boolean doCheckOwner, FsAction access, FsAction subAccess,
@@ -267,10 +276,15 @@ class FSPermissionChecker {
   /**
    * Guarded by {@link FSNamesystem#readLock()}
    */
-  private void checkTraverse(INode[] inodes, int last)
+  private void checkTraverse(INodesInPath iip)
       throws IOException {
-    for (int j = 0; j <= last; j++) {
-      check(inodes[j], FsAction.EXECUTE);
+    List<INode> inodes = iip.getReadOnlyINodes();
+    for (int i = 0; i < inodes.size() - 1; i++) {
+      INode inode = inodes.get(i);
+      if (inode == null) {
+        break;
+      }
+      check(inode, FsAction.EXECUTE);
     }
   }
 
@@ -297,14 +311,6 @@ class FSPermissionChecker {
         }
       }
     }
-  }
-
-  /**
-   * Guarded by {@link FSNamesystem#readLock()}
-   */
-  private void check(INode[] inodes, int i, FsAction access)
-      throws IOException {
-    check(i >= 0 ? inodes[i] : null, access);
   }
 
   /**
@@ -426,7 +432,7 @@ class FSPermissionChecker {
     }
 
     throw new AccessControlException(
-      toAccessControlString(inode, access, mode, featureEntries));
+      toAccessControlString(inode, access, mode, featureEntries, true));
   }
   
   private void checkAccessAcl(ProjectedINode inode, FsAction access,
@@ -484,7 +490,7 @@ class FSPermissionChecker {
     }
     
     throw new AccessControlException(
-        toAccessControlString(inode, access, mode, featureEntries));
+        toAccessControlString(inode, access, mode, featureEntries, true));
   }
 
   void check(ProjectedINode inode, FsAction access, List<AclEntry> aclEntries) throws IOException {

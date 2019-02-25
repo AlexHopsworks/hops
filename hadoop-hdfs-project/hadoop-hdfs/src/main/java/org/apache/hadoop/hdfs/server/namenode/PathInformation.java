@@ -18,32 +18,27 @@ package org.apache.hadoop.hdfs.server.namenode;
 import java.util.List;
 import org.apache.hadoop.fs.permission.AclEntry;
 
-/**
- *
- * @author gautier
- */
 public class PathInformation {
 
   private String path;
   private byte[][] pathComponents;
-  private INode[] pathInodes;
+  private INodesInPath IIP;
   private boolean dir;
   private long nsCount;
   private long dsCount;
-  private int numExistingComp;
+  
   private final INodeAttributes subtreeRootAttributes;
   private final List<AclEntry>[] pathInodeAcls;
 
   public PathInformation(String path,
-      byte[][] pathComponents, INode[] pathInodes, int numExistingComp,
+      byte[][] pathComponents, INodesInPath IIP,
       boolean dir, long nsCount, long dsCount, INodeAttributes subtreeRootAttributes, List<AclEntry>[] pathInodeAcls) {
     this.path = path;
     this.pathComponents = pathComponents;
-    this.pathInodes = pathInodes;
+    this.IIP = IIP;
     this.dir = dir;
     this.nsCount = nsCount;
     this.dsCount = dsCount;
-    this.numExistingComp = numExistingComp;
     this.subtreeRootAttributes = subtreeRootAttributes;
     this.pathInodeAcls = pathInodeAcls;
   }
@@ -54,10 +49,6 @@ public class PathInformation {
 
   public byte[][] getPathComponents() {
     return pathComponents;
-  }
-
-  public INode[] getPathInodes() {
-    return pathInodes;
   }
 
   public boolean isDir() {
@@ -72,10 +63,10 @@ public class PathInformation {
     return dsCount;
   }
 
-  public int getNumExistingComp() {
-    return numExistingComp;
+  public INodesInPath getINodesInPath(){
+    return IIP;
   }
-
+  
   public INodeAttributes getSubtreeRootAttributes() {
     return subtreeRootAttributes;
   }

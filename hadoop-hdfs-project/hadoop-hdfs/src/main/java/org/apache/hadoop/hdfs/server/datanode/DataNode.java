@@ -614,7 +614,8 @@ public class DataNode extends ReconfigurableBase
           try {
             IOException ioe = ioExceptionFuture.get();
             if (ioe != null) {
-              errorMessageBuilder.append(String.format("FAILED TO ADD: %s: %s\n",
+              errorMessageBuilder.append(
+                  String.format("FAILED TO ADD: %s: %s%n",
                   volume, ioe.getMessage()));
               LOG.error("Failed to add volume: " + volume, ioe);
             } else {
@@ -622,8 +623,9 @@ public class DataNode extends ReconfigurableBase
               LOG.info("Successfully added volume: " + volume);
             }
           } catch (Exception e) {
-            errorMessageBuilder.append(String.format("FAILED to ADD: %s: %s\n",
-                volume, e.getMessage()));
+            errorMessageBuilder.append(
+                String.format("FAILED to ADD: %s: %s%n", volume,
+                              e.toString()));
           }
         }
       }
@@ -1743,9 +1745,13 @@ public class DataNode extends ReconfigurableBase
     // in order to avoid any further acceptance of requests, but the peers
     // for block writes are not closed until the clients are notified.
     if (dataXceiverServer != null) {
-      xserver.sendOOBToPeers();
-      ((DataXceiverServer) this.dataXceiverServer.getRunnable()).kill();
-      this.dataXceiverServer.interrupt();
+      try {
+        xserver.sendOOBToPeers();
+        ((DataXceiverServer) this.dataXceiverServer.getRunnable()).kill();
+        this.dataXceiverServer.interrupt();
+      } catch (Throwable e) {
+        // Ignore, since the out of band messaging is advisory.
+      }
     }
     
     // Record the time of initial notification

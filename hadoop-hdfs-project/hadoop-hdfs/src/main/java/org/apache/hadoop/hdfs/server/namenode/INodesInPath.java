@@ -18,6 +18,7 @@
 package org.apache.hadoop.hdfs.server.namenode;
 
 
+import com.google.common.collect.ImmutableList;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.Path;
@@ -28,6 +29,10 @@ import org.apache.hadoop.hdfs.protocol.UnresolvedPathException;
 import com.google.common.base.Preconditions;
 import io.hops.exception.StorageException;
 import io.hops.exception.TransactionContextException;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.NoSuchElementException;
 
 /**
  * Contains INodes information resolved from a given path.
@@ -45,7 +50,6 @@ public class INodesInPath {
     }
     final byte[][] path = new byte[depth][];
     final INode[] inodes = new INode[depth];
-    final INodesInPath iip = new INodesInPath(path, depth);
     tmp = inode;
     index = depth;
     while (tmp != null) {
@@ -54,8 +58,7 @@ public class INodesInPath {
       inodes[index] = tmp;
       tmp = tmp.getParent();
     }
-    iip.setINodes(inodes);
-    return iip;
+    return new INodesInPath(inodes, path);
   }
     
   /**
@@ -77,18 +80,11 @@ public class INodesInPath {
     return buf.toString();
   }
 
-  static INodesInPath resolve(final INodeDirectory startingDir,
-      final byte[][] components) throws UnresolvedLinkException, StorageException, TransactionContextException {
-    return resolve(startingDir, components, components.length, false);
-  }
-
   /**
-   * Retrieve existing INodes from a path. If existing is big enough to store
-   * all path components (existing and non-existing), then existing INodes
-   * will be stored starting from the root INode into existing[0]; if
-   * existing is not big enough to store all path components, then only the
-   * last existing and non existing INodes will be stored so that
-   * existing[existing.length-1] refers to the INode of the final component.
+   * Retrieve existing INodes from a path. For non-snapshot path,
+   * the number of INodes is equal to the number of path components. For
+   * snapshot path (e.g., /foo/.snapshot/s1/bar), the number of INodes is
+   * (number_of_path_components - 1).
    * <p>
    * An UnresolvedPathException is always thrown when an intermediate path
    * component refers to a symbolic link. If the final path component refers
@@ -98,53 +94,36 @@ public class INodesInPath {
    * <p>
    * Example: <br>
    * Given the path /c1/c2/c3 where only /c1/c2 exists, resulting in the
-   * following path components: ["","c1","c2","c3"],
+   * following path components: ["","c1","c2","c3"]
    * <p>
    * <p>
-   * <code>getExistingPathINodes(["","c1","c2"], [?])</code> should fill the
-   * array with [c2] <br>
-   * <code>getExistingPathINodes(["","c1","c2","c3"], [?])</code> should fill the
-   * array with [null]
-   * <p>
-   * <p>
-   * <code>getExistingPathINodes(["","c1","c2"], [?,?])</code> should fill the
-   * array with [c1,c2] <br>
-   * <code>getExistingPathINodes(["","c1","c2","c3"], [?,?])</code> should fill
-   * the array with [c2,null]
-   * <p>
-   * <p>
-   * <code>getExistingPathINodes(["","c1","c2"], [?,?,?,?])</code> should fill
-   * the array with [rootINode,c1,c2,null], <br>
-   * <code>getExistingPathINodes(["","c1","c2","c3"], [?,?,?,?])</code> should
+   * <code>getExistingPathINodes(["","c1","c2"])</code> should fill
+   * the array with [rootINode,c1,c2], <br>
+   * <code>getExistingPathINodes(["","c1","c2","c3"])</code> should
    * fill the array with [rootINode,c1,c2,null]
    *
    * @param startingDir the starting directory
    * @param components array of path component name
-   * @param numOfINodes number of INodes to return
    * @param resolveLink indicates whether UnresolvedLinkException should
    * be thrown when the path refers to a symbolic link.
    * @return the specified number of existing INodes in the path
    */
   static INodesInPath resolve(final INodeDirectory startingDir,
-      final byte[][] components, final int numOfINodes,
-      final boolean resolveLink) throws UnresolvedLinkException, StorageException, TransactionContextException {
+      final byte[][] components, final boolean resolveLink) throws UnresolvedLinkException, StorageException,
+      TransactionContextException {
     Preconditions.checkArgument(startingDir.compareTo(components[0]) == 0);
 
     INode curNode = startingDir;
-    final INodesInPath existing = new INodesInPath(components, numOfINodes);
     int count = 0;
-    int index = numOfINodes - components.length;
-    if (index > 0) {
-      index = 0;
-    }
+    int inodeNum = 0;
+    INode[] inodes = new INode[components.length];
+    
     while (count < components.length && curNode != null) {
       final boolean lastComp = (count == components.length - 1);
-      if (index >= 0) {
-        existing.addNode(curNode);
-      }
+      inodes[inodeNum++] = curNode;
       final boolean isDir = curNode.isDirectory();
       final INodeDirectory dir = isDir ? curNode.asDirectory() : null;
-      if (curNode.isSymlink() && (!lastComp || (lastComp && resolveLink))) {
+      if (curNode.isSymlink() && (!lastComp || resolveLink)) {
         final String path = constructPath(components, 0, components.length);
         final String preceding = constructPath(components, 0, count);
         final String remainder = constructPath(components, count + 1, components.length);
@@ -164,96 +143,166 @@ public class INodesInPath {
       // normal case, and also for resolving file/dir under snapshot root
       curNode = dir.getChildINode(childName);
       count++;
-      index++;
     }
-    return existing;
+    return new INodesInPath(inodes, components);
   }
 
+  /**
+   * Replace an inode of the given INodesInPath in the given position. We do a
+   * deep copy of the INode array.
+   * @param pos the position of the replacement
+   * @param inode the new inode
+   * @return a new INodesInPath instance
+   */
+  public static INodesInPath replace(INodesInPath iip, int pos, INode inode) {
+    Preconditions.checkArgument(iip.length() > 0 && pos > 0 // no for root
+        && pos < iip.length());
+    if (iip.getINode(pos) == null) {
+      Preconditions.checkState(iip.getINode(pos - 1) != null);
+    }
+    INode[] inodes = new INode[iip.inodes.length];
+    System.arraycopy(iip.inodes, 0, inodes, 0, inodes.length);
+    inodes[pos] = inode;
+    return new INodesInPath(inodes, iip.path);
+  }
+
+    /**
+   * Extend a given INodesInPath with a child INode. The child INode will be
+   * appended to the end of the new INodesInPath.
+   */
+  public static INodesInPath append(INodesInPath iip, INode child,
+      byte[] childName) {
+    Preconditions.checkArgument(iip.length() > 0);
+    Preconditions.checkArgument(iip.getLastINode() != null && iip
+        .getLastINode().isDirectory());
+    INode[] inodes = new INode[iip.length() + 1];
+    System.arraycopy(iip.inodes, 0, inodes, 0, inodes.length - 1);
+    inodes[inodes.length - 1] = child;
+    byte[][] path = new byte[iip.path.length + 1][];
+    System.arraycopy(iip.path, 0, path, 0, path.length - 1);
+    path[path.length - 1] = childName;
+    return new INodesInPath(inodes, path);
+  }
+  
   private final byte[][] path;
   /**
    * Array with the specified number of INodes resolved for a given path.
    */
-  private INode[] inodes;
-  /**
-   * Indicate the number of non-null elements in {@link #inodes}
-   */
-  private int numNonNull;
-  /**
-   * The path for a snapshot file/dir contains the .snapshot thus makes the
-   * length of the path components larger the number of inodes. We use
-   * the capacity to control this special case.
-   */
-  private int capacity;
+  private final INode[] inodes;
 
-  private INodesInPath(byte[][] path, int number) {
+  private INodesInPath(INode[] inodes, byte[][] path) {
+    Preconditions.checkArgument(inodes != null && path != null);
+    this.inodes = inodes;
     this.path = path;
-    assert (number >= 0);
-    inodes = new INode[number];
-    capacity = number;
-    numNonNull = 0;
   }
-
-  /**
-   * @return a new array of inodes excluding the null elements introduced by
-   * snapshot path elements. E.g., after resolving path "/dir/.snapshot",
-   * {@link #inodes} is {/, dir, null}, while the returned array only contains
-   * inodes of "/" and "dir". Note the length of the returned array is always
-   * equal to {@link #capacity}.
-   */
-  INode[] getINodes() {
-    if (capacity == inodes.length) {
-      return inodes;
-    }
-
-    INode[] newNodes = new INode[capacity];
-    System.arraycopy(inodes, 0, newNodes, 0, capacity);
-    return newNodes;
-  }
-
+  
   /**
    * @return the i-th inode if i >= 0;
    * otherwise, i < 0, return the (length + i)-th inode.
    */
   public INode getINode(int i) {
-    return inodes[i >= 0 ? i : inodes.length + i];
+    if (inodes == null || inodes.length == 0) {
+      throw new NoSuchElementException("inodes is null or empty");
+    }
+    int index = i >= 0 ? i : inodes.length + i;
+    if (index < inodes.length && index >= 0) {
+      return inodes[index];
+    } else {
+      throw new NoSuchElementException("inodes.length == " + inodes.length);
+    }
   }
 
   /**
    * @return the last inode.
    */
   public INode getLastINode() {
-    return inodes[inodes.length - 1];
+    return getINode(-1);
   }
 
   byte[] getLastLocalName() {
     return path[path.length - 1];
   }
   
-  /**
-   * Add an INode at the end of the array
-   */
-  private void addNode(INode node) {
-    inodes[numNonNull++] = node;
+  public byte[][] getPathComponents() {
+    return path;
+  }
+  
+  /** @return the full path in string form */
+  public String getPath() {
+    return DFSUtil.byteArray2PathString(path);
+  }
+  
+  public String getParentPath() {
+    return getPath(path.length - 1);
   }
 
-  private void setINodes(INode inodes[]) {
-    this.inodes = inodes;
-    this.numNonNull = this.inodes.length;
-  }
-
-  void setINode(int i, INode inode) {
-    inodes[i >= 0 ? i : inodes.length + i] = inode;
-  }
-
-  void setLastINode(INode last) {
-    inodes[inodes.length - 1] = last;
+  public String getPath(int pos) {
+    return DFSUtil.byteArray2PathString(path, 0, pos);
   }
 
   /**
-   * @return The number of non-null elements
+   * @param offset start endpoint (inclusive)
+   * @param length number of path components
+   * @return sub-list of the path
    */
-  int getNumNonNull() {
-    return numNonNull;
+  public List<String> getPath(int offset, int length) {
+    Preconditions.checkArgument(offset >= 0 && length >= 0 && offset + length
+        <= path.length);
+    ImmutableList.Builder<String> components = ImmutableList.builder();
+    for (int i = offset; i < offset + length; i++) {
+      components.add(DFSUtil.bytes2String(path[i]));
+    }
+    return components.build();
+  }
+
+  public int length() {
+    return inodes.length;
+  }
+
+  public List<INode> getReadOnlyINodes() {
+    return Collections.unmodifiableList(Arrays.asList(inodes));
+  }
+
+   /**
+   * @param length number of ancestral INodes in the returned INodesInPath
+   *               instance
+   * @return the INodesInPath instance containing ancestral INodes. Note that
+   * this method only handles non-snapshot paths.
+   */
+  private INodesInPath getAncestorINodesInPath(int length) {
+    Preconditions.checkArgument(length >= 0 && length < inodes.length);
+    final INode[] anodes = new INode[length];
+    final byte[][] apath = new byte[length][];
+    System.arraycopy(this.inodes, 0, anodes, 0, length);
+    System.arraycopy(this.path, 0, apath, 0, length);
+    return new INodesInPath(anodes, apath);
+  }
+
+  /**
+   * @return an INodesInPath instance containing all the INodes in the parent
+   *         path. We do a deep copy here.
+   */
+  public INodesInPath getParentINodesInPath() {
+    return inodes.length > 1 ? getAncestorINodesInPath(inodes.length - 1) :
+        null;
+  }
+
+  /**
+   * @return a new INodesInPath instance that only contains exisitng INodes.
+   * Note that this method only handles non-snapshot paths.
+   */
+  public INodesInPath getExistingINodes() {
+    int i = 0;
+    for (; i < inodes.length; i++) {
+      if (inodes[i] == null) {
+        break;
+      }
+    }
+    INode[] existing = new INode[i];
+    byte[][] existingPath = new byte[i][];
+    System.arraycopy(inodes, 0, existing, 0, i);
+    System.arraycopy(path, 0, existingPath, 0, i);
+    return new INodesInPath(existing, existingPath);
   }
 
   private static String toString(INode inode) {
@@ -272,7 +321,7 @@ public class INodesInPath {
 
   private String toString(boolean vaildateObject) throws StorageException, TransactionContextException {
     if (vaildateObject) {
-      vaildate();
+      validate();
     }
 
     final StringBuilder b = new StringBuilder(getClass().getSimpleName())
@@ -289,17 +338,14 @@ public class INodesInPath {
       }
       b.append("], length=").append(inodes.length);
     }
-    b.append("\n  numNonNull = ").append(numNonNull)
-        .append("\n  capacity   = ").append(capacity);
+    
     return b.toString();
   }
 
-  void vaildate() throws StorageException, TransactionContextException {
-    // check parent up to snapshotRootIndex or numNonNull
-    final int n = numNonNull;
+  void validate() throws StorageException, TransactionContextException {
     int i = 0;
     if (inodes[i] != null) {
-      for (i++; i < n && inodes[i] != null; i++) {
+      for (i++; i < inodes.length && inodes[i] != null; i++) {
         final INodeDirectory parent_i = inodes[i].getParent();
         final INodeDirectory parent_i_1 = inodes[i - 1].getParent();
         if (parent_i != inodes[i - 1] && (parent_i_1 == null || parent_i != parent_i_1)) {
@@ -311,8 +357,8 @@ public class INodesInPath {
         }
       }
     }
-    if (i != n) {
-      throw new AssertionError("i = " + i + " != " + n
+    if (i != inodes.length) {
+      throw new AssertionError("i = " + i + " != " + inodes.length
           + ", this=" + toString(false));
     }
   }

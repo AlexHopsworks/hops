@@ -627,6 +627,10 @@ public class DFSConfigKeys extends CommonConfigurationKeys {
   public static final float
       DFS_NAMENODE_USE_STALE_DATANODE_FOR_WRITE_RATIO_DEFAULT = 0.5f;
 
+  // Number of blocks to rescan for each iteration of postponedMisreplicatedBlocks.
+  public static final String DFS_NAMENODE_BLOCKS_PER_POSTPONEDBLOCKS_RESCAN_KEY = "dfs.namenode.blocks.per.postponedblocks.rescan";
+  public static final long DFS_NAMENODE_BLOCKS_PER_POSTPONEDBLOCKS_RESCAN_KEY_DEFAULT = 10000;
+
   // Replication monitoring related keys
   public static final String DFS_NAMENODE_INVALIDATE_WORK_PCT_PER_ITERATION =
       "dfs.namenode.invalidate.work.pct.per.iteration";
@@ -1034,22 +1038,22 @@ public class DFSConfigKeys extends CommonConfigurationKeys {
       "dfs.client.hedged.read.threadpool.size";
   public static final int DEFAULT_DFSCLIENT_HEDGED_READ_THREADPOOL_SIZE = 0;
 
-   // Slow io warning log threshold settings for dfsclient and datanode.
-   public static final String DFS_CLIENT_SLOW_IO_WARNING_THRESHOLD_KEY =
-     "dfs.client.slow.io.warning.threshold.ms";
-   public static final long DFS_CLIENT_SLOW_IO_WARNING_THRESHOLD_DEFAULT = 30000;
-   public static final String DFS_DATANODE_SLOW_IO_WARNING_THRESHOLD_KEY =
-     "dfs.datanode.slow.io.warning.threshold.ms";
-   public static final long DFS_DATANODE_SLOW_IO_WARNING_THRESHOLD_DEFAULT = 300;
+  // Slow io warning log threshold settings for dfsclient and datanode.
+  public static final String DFS_CLIENT_SLOW_IO_WARNING_THRESHOLD_KEY =
+    "dfs.client.slow.io.warning.threshold.ms";
+  public static final long DFS_CLIENT_SLOW_IO_WARNING_THRESHOLD_DEFAULT = 30000;
+  public static final String DFS_DATANODE_SLOW_IO_WARNING_THRESHOLD_KEY =
+    "dfs.datanode.slow.io.warning.threshold.ms";
+  public static final long DFS_DATANODE_SLOW_IO_WARNING_THRESHOLD_DEFAULT = 300;
 
   public static final String DFS_NAMENODE_INOTIFY_MAX_EVENTS_PER_RPC_KEY =
       "dfs.namenode.inotify.max.events.per.rpc";
   public static final int DFS_NAMENODE_INOTIFY_MAX_EVENTS_PER_RPC_DEFAULT =
       1000;
 
-   public static final String DFS_DATANODE_BLOCK_ID_LAYOUT_UPGRADE_THREADS_KEY =
-       "dfs.datanode.block.id.layout.upgrade.threads";
-   public static final int DFS_DATANODE_BLOCK_ID_LAYOUT_UPGRADE_THREADS = 12;
+  public static final String DFS_DATANODE_BLOCK_ID_LAYOUT_UPGRADE_THREADS_KEY =
+      "dfs.datanode.block.id.layout.upgrade.threads";
+  public static final int DFS_DATANODE_BLOCK_ID_LAYOUT_UPGRADE_THREADS = 12;
   public static final String IGNORE_SECURE_PORTS_FOR_TESTING_KEY =
       "ignore.secure.ports.for.testing";
   public static final boolean IGNORE_SECURE_PORTS_FOR_TESTING_DEFAULT = false;
@@ -1069,6 +1073,8 @@ public class DFSConfigKeys extends CommonConfigurationKeys {
       "dfs.namenode.top.windows.minutes";
   public static final String[] NNTOP_WINDOWS_MINUTES_DEFAULT = {"1","5","25"};
   
+  public static final String DFS_LOCATION_DOMAIN_ID = "dfs.locationDomainId";
+  public static final byte DFS_LOCATION_DOMAIN_ID_DEFAULT = 0;
   
   public static final String DFS_HDFS_PROVENANCE_ENABLED =
       "dfs.namenode.hdfs-provenance.enabled";

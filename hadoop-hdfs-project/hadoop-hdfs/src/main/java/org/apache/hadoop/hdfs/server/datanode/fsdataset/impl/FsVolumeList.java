@@ -36,7 +36,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 class FsVolumeList {
   private final AtomicReference<FsVolumeImpl[]> volumes =
-      new AtomicReference<FsVolumeImpl[]>(new FsVolumeImpl[0]);
+      new AtomicReference<>(new FsVolumeImpl[0]);
+  private Object checkDirsMutex = new Object();
 
   private final VolumeChoosingPolicy<FsVolumeImpl> blockChooser;
   private volatile int numFailedVolumes;
@@ -57,20 +58,19 @@ class FsVolumeList {
   List<FsVolumeImpl> getVolumes() {
     return Collections.unmodifiableList(Arrays.asList(volumes.get()));
   }
-  
-  /**
+
+  /** 
    * Get next volume.
    *
    * @param blockSize free space needed on the volume
-   * @param storageType the desired {@link StorageType}
+   * @param storageType the desired {@link StorageType} 
    * @return next volume to store the block in.
    */
-  synchronized FsVolumeImpl getNextVolume(StorageType storageType,
-      long blockSize) throws IOException {
+  FsVolumeImpl getNextVolume(StorageType storageType, long blockSize)
+      throws IOException {
     // Get a snapshot of currently available volumes.
     final FsVolumeImpl[] curVolumes = volumes.get();
-    final List<FsVolumeImpl> list =
-        new ArrayList<FsVolumeImpl>(curVolumes.length);
+    final List<FsVolumeImpl> list = new ArrayList<>(curVolumes.length);
     for(FsVolumeImpl v : curVolumes) {
       if (v.getStorageType() == storageType) {
         list.add(v);
@@ -78,7 +78,7 @@ class FsVolumeList {
     }
     return blockChooser.chooseVolume(list, blockSize);
   }
-
+  
   long getDfsUsed() throws IOException {
     long dfsUsed = 0L;
     for (FsVolumeImpl v : volumes.get()) {
@@ -156,38 +156,39 @@ class FsVolumeList {
    * Calls {@link FsVolumeImpl#checkDirs()} on each volume, removing any
    * volumes from the active list that result in a DiskErrorException.
    * <p/>
-   * This method is synchronized to allow only one instance of checkDirs()
-   * call
+   * Use checkDirsMutext to allow only one instance of checkDirs() call
    *
    * @return list of all the removed volumes.
    */
-  synchronized List<FsVolumeImpl> checkDirs() {
-    ArrayList<FsVolumeImpl> removedVols = null;
+  List<FsVolumeImpl> checkDirs() {
+    synchronized (checkDirsMutex) {
+      ArrayList<FsVolumeImpl> removedVols = null;
 
-    // Make a copy of volumes for performing modification 
-    final List<FsVolumeImpl> volumeList = getVolumes();
+      // Make a copy of volumes for performing modification 
+      final List<FsVolumeImpl> volumeList = getVolumes();
 
-    for (Iterator<FsVolumeImpl> i = volumeList.iterator(); i.hasNext(); ) {
-      final FsVolumeImpl fsv = i.next();
-      try {
-        fsv.checkDirs();
-      } catch (DiskErrorException e) {
-        FsDatasetImpl.LOG.warn("Removing failed volume " + fsv + ": ", e);
-        if (removedVols == null) {
-          removedVols = new ArrayList<>(1);
+      for (Iterator<FsVolumeImpl> i = volumeList.iterator(); i.hasNext();) {
+        final FsVolumeImpl fsv = i.next();
+        try {
+          fsv.checkDirs();
+        } catch (DiskErrorException e) {
+          FsDatasetImpl.LOG.warn("Removing failed volume " + fsv + ": ", e);
+          if (removedVols == null) {
+            removedVols = new ArrayList<>(1);
+          }
+          removedVols.add(fsv);
+          removeVolume(fsv);
+          numFailedVolumes++;
         }
-        removedVols.add(fsv);
-        removeVolume(fsv);
-        numFailedVolumes++;
       }
-    }
 
-    if (removedVols != null && removedVols.size() > 0) {
-      FsDatasetImpl.LOG.warn("Completed checkDirs. Removed " + removedVols.size()
-          + " volumes. Current volumes: " + this);
-    }
+      if (removedVols != null && removedVols.size() > 0) {
+        FsDatasetImpl.LOG.warn("Completed checkDirs. Removed " + removedVols.size()
+            + " volumes. Current volumes: " + this);
+      }
 
-    return removedVols;
+      return removedVols;
+    }
   }
 
   @Override
@@ -238,7 +239,7 @@ class FsVolumeList {
           if (FsDatasetImpl.LOG.isDebugEnabled()) {
             FsDatasetImpl.LOG.debug(
                 "The volume list has been changed concurrently, " +
-                    "retry to remove volume: " + target);
+                "retry to remove volume: " + target);
           }
         }
       } else {
@@ -252,10 +253,10 @@ class FsVolumeList {
   }
 
   /**
-   * Dynamically remove volume to the list.
+   * Dynamically remove volume in the list.
    * @param volume the volume to be removed.
    */
-  synchronized void removeVolume(String volume) {
+  void removeVolume(String volume) {
     // Make a copy of volumes to remove one volume.
     final FsVolumeImpl[] curVolumes = volumes.get();
     final List<FsVolumeImpl> volumeList = Lists.newArrayList(curVolumes);
@@ -319,7 +320,7 @@ class FsVolumeList {
 
   void shutdown() {
     for (FsVolumeImpl volume : volumes.get()) {
-      if (volume != null) {
+      if(volume != null) {
         volume.shutdown();
       }
     }

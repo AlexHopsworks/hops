@@ -153,6 +153,7 @@ import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
 import org.apache.hadoop.hdfs.protocol.RecoveryInProgressException;
 import org.apache.hadoop.hdfs.protocol.RollingUpgradeInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BRLoadBalancingOverloadException;
+import org.apache.hadoop.ipc.RetryCache;
 
 /**
  * This class is responsible for handling all of the RPC calls to the NameNode.
@@ -538,13 +539,13 @@ class NameNodeRpcServer implements NamenodeProtocols {
   @Override // ClientProtocol
   public void setPermission(String src, FsPermission permissions)
       throws IOException {
-    namesystem.setPermissionSTO(src, permissions);
+    namesystem.setPermission(src, permissions);
   }
 
   @Override // ClientProtocol
   public void setOwner(String src, String username, String groupname)
       throws IOException {
-    namesystem.setOwnerSTO(src, username, groupname);
+    namesystem.setOwner(src, username, groupname);
   }
 
   @Override // ClientProtocol
@@ -681,8 +682,17 @@ class NameNodeRpcServer implements NamenodeProtocols {
               " characters, " + MAX_PATH_DEPTH + " levels.");
     }
 
-    boolean ret;
-    ret = namesystem.multiTransactionalRename(src, dst);
+    RetryCache.CacheEntry cacheEntry = namesystem.retryCacheWaitForCompletionTransactional();
+    if (cacheEntry != null && cacheEntry.isSuccess()) {
+      return true; // Return previous response
+    }
+    
+    boolean ret = false;
+    try{
+      ret = namesystem.renameTo(src, dst);
+    } finally {
+      namesystem.retryCacheSetStateTransactional(cacheEntry, ret);
+    }
     if (ret) {
       metrics.incrFilesRenamed();
     }
@@ -706,7 +716,18 @@ class NameNodeRpcServer implements NamenodeProtocols {
               " characters, " + MAX_PATH_DEPTH + " levels.");
     }
 
-    namesystem.multiTransactionalRename(src, dst, options);
+    RetryCache.CacheEntry cacheEntry = namesystem.retryCacheWaitForCompletionTransactional();
+    if (cacheEntry != null && cacheEntry.isSuccess()) {
+      return; // Return previous response
+    }
+
+    boolean success = false;
+    try {
+      namesystem.renameTo(src, dst, options);
+      success = true;
+    } finally {
+      namesystem.retryCacheSetStateTransactional(cacheEntry, success);
+    }
     metrics.incrFilesRenamed();
   }
 
@@ -796,10 +817,6 @@ class NameNodeRpcServer implements NamenodeProtocols {
   public DatanodeInfo[] getDatanodeReport(DatanodeReportType type)
       throws IOException {
     DatanodeInfo results[] = namesystem.datanodeReport(type);
-    if (results == null) {
-      throw new IOException("Failed to get datanode report for " + type
-          + " datanodes.");
-    }
     return results;
   }
 
@@ -807,10 +824,6 @@ class NameNodeRpcServer implements NamenodeProtocols {
   public DatanodeStorageReport[] getDatanodeStorageReport(
       DatanodeReportType type) throws IOException {
     final DatanodeStorageReport[] reports = namesystem.getDatanodeStorageReport(type);
-    if (reports == null ) {
-      throw new IOException("Failed to get datanode storage report for " + type
-          + " datanodes.");
-    }
     return reports;
   }
 
@@ -876,8 +889,7 @@ class NameNodeRpcServer implements NamenodeProtocols {
   @Override // ClientProtocol
   public void setQuota(String path, long namespaceQuota, long diskspaceQuota)
       throws IOException {
-      namesystem
-          .multiTransactionalSetQuota(path, namespaceQuota, diskspaceQuota);
+      namesystem.setQuota(path, namespaceQuota, diskspaceQuota);
   }
   
   @Override // ClientProtocol
@@ -894,8 +906,7 @@ class NameNodeRpcServer implements NamenodeProtocols {
   @Override // ClientProtocol
   public void createSymlink(String target, String link, FsPermission dirPerms,
       boolean createParent) throws IOException {
-    metrics.incrCreateSymlinkOps();
-    /* We enforce the MAX_PATH_LENGTH limit even though a symlink
+    /* We enforce the MAX_PATH_LENGTH limit even though a symlink target
      * URI may refer to a non-HDFS file system. 
      */
     if (!checkPathLength(link)) {
@@ -903,9 +914,7 @@ class NameNodeRpcServer implements NamenodeProtocols {
           " character limit");
 
     }
-    if ("".equals(target)) {
-      throw new IOException("Invalid symlink target");
-    }
+
     final UserGroupInformation ugi = getRemoteUser();
     namesystem.createSymlink(target, link,
         new PermissionStatus(ugi.getShortUserName(), null, dirPerms),
