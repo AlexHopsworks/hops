@@ -1297,6 +1297,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
         }
       }
     }
+    inodeFile.logProvenanceEvent(ProvenanceLogEntry.Operation.getBlockLocations());
     return ret;
   }
 
@@ -3568,7 +3569,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     // close file and persist block allocations for this file
     pendingFile.toCompleteFile(now());
     closeFile(src, pendingFile);
-    newFile.logProvenanceEvent(ProvenanceLogEntry.Operation.append());
+    pendingFile.logProvenanceEvent(ProvenanceLogEntry.Operation.append());
 
     if (!skipReplicationChecks) {
       blockManager.checkReplication(pendingFile);
