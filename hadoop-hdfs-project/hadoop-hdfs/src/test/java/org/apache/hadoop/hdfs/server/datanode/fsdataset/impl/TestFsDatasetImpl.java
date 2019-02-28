@@ -31,6 +31,7 @@ import org.apache.hadoop.hdfs.server.datanode.DNConf;
 import org.apache.hadoop.hdfs.server.datanode.DataBlockScanner;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.DataStorage;
+import org.apache.hadoop.hdfs.server.datanode.ReplicaHandler;
 import org.apache.hadoop.hdfs.server.datanode.StorageLocation;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.RoundRobinVolumeChoosingPolicy;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
@@ -45,6 +46,7 @@ import org.mockito.stubbing.Answer;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -69,6 +71,7 @@ public class TestFsDatasetImpl {
   private static final String BASE_DIR =
       new FileSystemTestHelper().getTestRootDir();
   private static final int NUM_INIT_VOLUMES = 2;
+  private static final String CLUSTER_ID = "cluser-id";
   private static final String[] BLOCK_POOL_IDS = {"bpid-0", "bpid-1"};
 
   // Use to generate storageUuid
@@ -83,7 +86,7 @@ public class TestFsDatasetImpl {
 
   private static Storage.StorageDirectory createStorageDirectory(File root) {
     Storage.StorageDirectory sd = new Storage.StorageDirectory(root);
-    dsForStorageUuid.createStorageID(sd);
+    dsForStorageUuid.createStorageID(sd, false);
     return sd;
   }
 
@@ -135,10 +138,11 @@ public class TestFsDatasetImpl {
     Set<String> expectedVolumes = new HashSet<String>();
     List<NamespaceInfo> nsInfos = Lists.newArrayList();
     for (String bpid : BLOCK_POOL_IDS) {
-      nsInfos.add(new NamespaceInfo(0, "cluster-id", bpid, 1));
+      nsInfos.add(new NamespaceInfo(0, CLUSTER_ID, bpid, 1));
     }
     for (int i = 0; i < numNewVolumes; i++) {
       String path = BASE_DIR + "/newData" + i;
+      expectedVolumes.add(path);
       StorageLocation loc = StorageLocation.parse(path);
       Storage.StorageDirectory sd = createStorageDirectory(new File(path));
       DataStorage.VolumeBuilder builder =
@@ -155,19 +159,22 @@ public class TestFsDatasetImpl {
 
     Set<String> actualVolumes = new HashSet<String>();
     for (int i = 0; i < numNewVolumes; i++) {
-      dataset.getVolumes().get(numExistingVolumes + i).getBasePath();
+      actualVolumes.add(
+          dataset.getVolumes().get(numExistingVolumes + i).getBasePath());
     }
     assertEquals(actualVolumes, expectedVolumes);
   }
 
-  @Test
+  @Test(timeout = 30000)
   public void testRemoveVolumes() throws IOException {
     // Feed FsDataset with block metadata.
     final int NUM_BLOCKS = 100;
     for (int i = 0; i < NUM_BLOCKS; i++) {
       String bpid = BLOCK_POOL_IDS[NUM_BLOCKS % BLOCK_POOL_IDS.length];
       ExtendedBlock eb = new ExtendedBlock(bpid, i);
-      dataset.createRbw(StorageType.DEFAULT, eb);
+      try (ReplicaHandler replica =
+          dataset.createRbw(StorageType.DEFAULT, eb)) {
+      }
     }
     final String[] dataDirs =
         conf.get(DFSConfigKeys.DFS_DATANODE_DATA_DIR_KEY).split(",");
@@ -208,6 +215,33 @@ public class TestFsDatasetImpl {
   }
 
   @Test(timeout = 5000)
+  public void testRemoveNewlyAddedVolume() throws IOException {
+    final int numExistingVolumes = dataset.getVolumes().size();
+    List<NamespaceInfo> nsInfos = new ArrayList<>();
+    for (String bpid : BLOCK_POOL_IDS) {
+      nsInfos.add(new NamespaceInfo(0, CLUSTER_ID, bpid, 1));
+    }
+    String newVolumePath = BASE_DIR + "/newVolumeToRemoveLater";
+    StorageLocation loc = StorageLocation.parse(newVolumePath);
+
+    Storage.StorageDirectory sd = createStorageDirectory(new File(newVolumePath));
+    DataStorage.VolumeBuilder builder =
+        new DataStorage.VolumeBuilder(storage, sd);
+    when(storage.prepareVolume(eq(datanode), eq(loc.getFile()),
+        anyListOf(NamespaceInfo.class)))
+        .thenReturn(builder);
+
+    dataset.addVolume(loc, nsInfos);
+    assertEquals(numExistingVolumes + 1, dataset.getVolumes().size());
+
+    when(storage.getNumStorageDirs()).thenReturn(numExistingVolumes + 1);
+    when(storage.getStorageDir(numExistingVolumes)).thenReturn(sd);
+    List<StorageLocation> volumesToRemove = Arrays.asList(loc);
+    dataset.removeVolumes(volumesToRemove);
+    assertEquals(numExistingVolumes, dataset.getVolumes().size());
+  }
+
+  @Test(timeout = 5000)
   public void testChangeVolumeWithRunningCheckDirs() throws IOException {
     RoundRobinVolumeChoosingPolicy<FsVolumeImpl> blockChooser =
         new RoundRobinVolumeChoosingPolicy<>();
@@ -231,7 +265,7 @@ public class TestFsDatasetImpl {
       @Override
       public Object answer(InvocationOnMock invocationOnMock)
           throws Throwable {
-        volumeList.removeVolume("data4");
+        volumeList.removeVolume(new File("data4"));
         volumeList.addVolume(newVolume);
         return null;
       }

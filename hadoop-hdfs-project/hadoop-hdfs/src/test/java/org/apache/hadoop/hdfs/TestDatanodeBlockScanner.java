@@ -18,7 +18,6 @@
 
 package org.apache.hadoop.hdfs;
 
-import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -28,7 +27,10 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.net.InetSocketAddress;
 import java.net.URL;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.TimeoutException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -42,6 +44,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
+import org.apache.hadoop.hdfs.server.datanode.DataBlockScanner;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
 import org.apache.hadoop.hdfs.server.datanode.ReplicaInfo;
@@ -179,10 +182,6 @@ public class TestDatanodeBlockScanner {
     cluster.shutdown();
   }
 
-  public static boolean corruptReplica(ExtendedBlock blk, int replica) throws IOException {
-    return MiniDFSCluster.corruptReplica(replica, blk);
-  }
-
   @Test
   public void testBlockCorruptionPolicy() throws Exception {
     Configuration conf = new HdfsConfiguration();
@@ -201,8 +200,8 @@ public class TestDatanodeBlockScanner {
     DFSTestUtil.waitReplication(fs, file1, (short)3);
     assertFalse(DFSTestUtil.allBlockReplicasCorrupt(cluster, file1, 0));
 
-    // Corrupt random replica of block
-    assertTrue(MiniDFSCluster.corruptReplica(rand, block));
+    // Corrupt random replica of block 
+    assertTrue(cluster.corruptReplica(rand, block));
 
     // Restart the datanode hoping the corrupt block to be reported
     cluster.restartDataNode(rand);
@@ -212,10 +211,10 @@ public class TestDatanodeBlockScanner {
     assertFalse(DFSTestUtil.allBlockReplicasCorrupt(cluster, file1, 0));
 
     // Corrupt all replicas. Now, block should be marked as corrupt
-    // and we should get all the replicas
-    assertTrue(MiniDFSCluster.corruptReplica(0, block));
-    assertTrue(MiniDFSCluster.corruptReplica(1, block));
-    assertTrue(MiniDFSCluster.corruptReplica(2, block));
+    // and we should get all the replicas 
+    assertTrue(cluster.corruptReplica(0, block));
+    assertTrue(cluster.corruptReplica(1, block));
+    assertTrue(cluster.corruptReplica(2, block));
 
     // Trigger each of the DNs to scan this block immediately.
     // The block pool scanner doesn't run frequently enough on its own
@@ -288,7 +287,7 @@ public class TestDatanodeBlockScanner {
       // Corrupt numCorruptReplicas replicas of block
       int[] corruptReplicasDNIDs = new int[numCorruptReplicas];
       for (int i=0, j=0; (j != numCorruptReplicas) && (i < numDataNodes); i++) {
-        if (corruptReplica(block, i)) {
+        if (cluster.corruptReplica(i, block)) {
           corruptReplicasDNIDs[j++] = i;
           LOG.info("successfully corrupted block " + block + " on node "
               + i + " " + cluster.getDataNodes().get(i).getDisplayName());
@@ -374,7 +373,7 @@ public class TestDatanodeBlockScanner {
       assertTrue(waitForVerification(infoPort, fs, fileName, 1, startTime, TIMEOUT) >= startTime);
 
       // Truncate replica of block
-      if (!changeReplicaLength(block, 0, -1)) {
+      if (!changeReplicaLength(cluster, block, 0, -1)) {
         throw new IOException(
             "failed to find or change length of replica on node 0 "
                 + cluster.getDataNodes().get(0).getDisplayName());
@@ -404,7 +403,7 @@ public class TestDatanodeBlockScanner {
           cluster.getFileSystem(), fileName, REPLICATION_FACTOR);
 
       // Make sure that truncated block will be deleted
-      waitForBlockDeleted(block, 0, TIMEOUT);
+      waitForBlockDeleted(cluster, block, 0, TIMEOUT);
     } finally {
       cluster.shutdown();
     }
@@ -413,9 +412,9 @@ public class TestDatanodeBlockScanner {
   /**
    * Change the length of a block at datanode dnIndex
    */
-  static boolean changeReplicaLength(ExtendedBlock blk, int dnIndex,
-      int lenDelta) throws IOException {
-    File blockFile = MiniDFSCluster.getBlockFile(dnIndex, blk);
+  static boolean changeReplicaLength(MiniDFSCluster cluster, ExtendedBlock blk,
+      int dnIndex, int lenDelta) throws IOException {
+    File blockFile = cluster.getBlockFile(dnIndex, blk);
     if (blockFile != null && blockFile.exists()) {
       RandomAccessFile raFile = new RandomAccessFile(blockFile, "rw");
       raFile.setLength(raFile.length()+lenDelta);
@@ -425,10 +424,11 @@ public class TestDatanodeBlockScanner {
     LOG.info("failed to change length of block " + blk);
     return false;
   }
-
-  private static void waitForBlockDeleted(ExtendedBlock blk, int dnIndex,
-      long timeout) throws TimeoutException, InterruptedException {
-    File blockFile = MiniDFSCluster.getBlockFile(dnIndex, blk);
+  
+  private static void waitForBlockDeleted(MiniDFSCluster cluster,
+      ExtendedBlock blk, int dnIndex, long timeout) throws TimeoutException,
+      InterruptedException {
+    File blockFile = cluster.getBlockFile(dnIndex, blk);
     long failtime = Time.monotonicNow()
         + ((timeout > 0) ? timeout : Long.MAX_VALUE);
     while (blockFile != null && blockFile.exists()) {
@@ -437,7 +437,7 @@ public class TestDatanodeBlockScanner {
             + blockFile.getPath() + (blockFile.exists() ? " still exists; " : " is absent; "));
       }
       Thread.sleep(100);
-      blockFile = MiniDFSCluster.getBlockFile(dnIndex, blk);
+      blockFile = cluster.getBlockFile(dnIndex, blk);
     }
   }
   
@@ -490,6 +490,61 @@ public class TestDatanodeBlockScanner {
           DFSTestUtil.getFirstBlock(fs, new Path("/test" + (9))));
       assertEquals("There should not be duplicate scan", scanTimeBefore,
           scanTimeAfter);
+    } finally {
+      IOUtils.closeStream(fs);
+      cluster.shutdown();
+    }
+  }
+  
+/**
+ * This test verifies whether block is added to the first location of 
+ * BlockPoolSliceScanner#blockInfoSet
+ */
+  @Test
+  public void testAddBlockInfoToFirstLocation() throws Exception {
+    MiniDFSCluster cluster = new MiniDFSCluster.Builder(new Configuration())
+        .numDataNodes(1).build();
+    FileSystem fs = null;
+    try {
+      fs = cluster.getFileSystem();
+      DataNode dataNode = cluster.getDataNodes().get(0);
+      // Creating a bunch of blocks
+      for (int i = 1; i < 10; i++) {
+        Path fileName = new Path("/test" + i);
+        DFSTestUtil.createFile(fs, fileName, 1024, (short) 1, 1000L);
+      } 
+      // Get block of the first file created (file1)
+      ExtendedBlock block = DFSTestUtil.getFirstBlock(fs, new Path("/test1"));
+      dataNode.getBlockScanner().setLastScanTimeDifference(block, 0);
+      // Let it sleep for more than 5 seconds so that BlockPoolSliceScanner can
+      // scan the first set of blocks
+      Thread.sleep(10000);
+      Long scanTime1Fortest1Block = DataNodeTestUtils.getLatestScanTime(
+          dataNode, block);
+      // Create another set of blocks
+      for (int i = 10; i < 20; i++) {
+        Path fileName = new Path("/test" + i);
+        DFSTestUtil.createFile(fs, fileName, 1024, (short) 1, 1000L);
+      }
+      dataNode.getBlockScanner().addBlock(block, true);
+      // Sleep so that BlockPoolSliceScanner can scan the second set of blocks
+      // and one block which we scheduled to rescan
+      Thread.sleep(10000);
+      // Get the lastScanTime of all of the second set of blocks
+      Set<Long> lastScanTimeSet = new HashSet<Long>();
+      for (int i = 10; i < 20; i++) {
+        long lastScanTime = DataNodeTestUtils.getLatestScanTime(dataNode,
+            DFSTestUtil.getFirstBlock(fs, new Path("/test" + i)));
+        lastScanTimeSet.add(lastScanTime);
+      }
+      Long scanTime2Fortest1Block = DataNodeTestUtils.getLatestScanTime(
+          dataNode, DFSTestUtil.getFirstBlock(fs, new Path("/test1")));
+      Long minimumLastScanTime = Collections.min(lastScanTimeSet);
+      assertTrue("The second scanTime for test1 block should be greater than "
+         + "first scanTime", scanTime2Fortest1Block > scanTime1Fortest1Block);
+      assertTrue("The second scanTime for test1 block should be less than or"
+         + " equal to minimum of the lastScanTime of second set of blocks",
+          scanTime2Fortest1Block <= minimumLastScanTime);
     } finally {
       IOUtils.closeStream(fs);
       cluster.shutdown();
