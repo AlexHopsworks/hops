@@ -24,12 +24,14 @@ import io.hops.metadata.common.entity.IntVariable;
 import io.hops.metadata.common.entity.LongVariable;
 import io.hops.metadata.common.entity.Variable;
 import io.hops.metadata.hdfs.dal.VariableDataAccess;
+import io.hops.metadata.yarn.dal.AppProvenanceDataAccess;
 import io.hops.metadata.yarn.dal.ReservationStateDataAccess;
 import io.hops.metadata.yarn.dal.rmstatestore.ApplicationAttemptStateDataAccess;
 import io.hops.metadata.yarn.dal.rmstatestore.ApplicationStateDataAccess;
 import io.hops.metadata.yarn.dal.rmstatestore.DelegationKeyDataAccess;
 import io.hops.metadata.yarn.dal.rmstatestore.DelegationTokenDataAccess;
 import io.hops.metadata.yarn.dal.util.YARNOperationType;
+import io.hops.metadata.yarn.entity.AppProvenanceEntry;
 import io.hops.metadata.yarn.entity.ReservationState;
 import io.hops.metadata.yarn.entity.rmstatestore.ApplicationAttemptState;
 import io.hops.metadata.yarn.entity.rmstatestore.ApplicationState;
@@ -66,6 +68,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.RMDelegati
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.impl.pb.AMRMTokenSecretManagerStatePBImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.impl.pb.ApplicationAttemptStateDataPBImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.impl.pb.ApplicationStateDataPBImpl;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppState;
 import org.apache.hadoop.yarn.util.ConverterUtils;
 
 public class DBRMStateStore extends RMStateStore {
@@ -423,11 +426,27 @@ public class DBRMStateStore extends RMStateStore {
         ApplicationState state = new ApplicationState(appIdString, appState,
                 user, name, stateN);
         DA.add(state);
+        logProvenance(state);
         connector.commit();
         return null;
       }
     };
     setApplicationStateHandler.handle();
+  }
+  
+  private void logProvenance(ApplicationState state) throws StorageException {
+    switch (RMAppState.valueOf(state.getState())) {
+      case NEW:
+      case FINISHED:
+      case KILLED:
+      case FAILED:
+        AppProvenanceDataAccess<AppProvenanceEntry> da
+          = (AppProvenanceDataAccess) RMStorageFactory.getDataAccess(AppProvenanceDataAccess.class);
+        da.add(new AppProvenanceEntry(state, System.currentTimeMillis()));
+        break;
+      default:
+      //do nothing - not tracking these states
+    }
   }
 
   @Override
