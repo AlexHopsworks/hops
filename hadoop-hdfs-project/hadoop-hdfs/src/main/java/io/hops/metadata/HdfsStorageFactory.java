@@ -65,7 +65,6 @@ import io.hops.metadata.hdfs.dal.LeasePathDataAccess;
 import io.hops.metadata.hdfs.dal.OngoingSubTreeOpsDataAccess;
 import io.hops.metadata.hdfs.dal.MetadataLogDataAccess;
 import io.hops.metadata.hdfs.dal.PendingBlockDataAccess;
-import io.hops.metadata.hdfs.dal.ProvenanceLogDataAccess;
 import io.hops.metadata.hdfs.dal.QuotaUpdateDataAccess;
 import io.hops.metadata.hdfs.dal.ReplicaDataAccess;
 import io.hops.metadata.hdfs.dal.ReplicaUnderConstructionDataAccess;
@@ -81,7 +80,7 @@ import io.hops.metadata.hdfs.entity.Replica;
 import io.hops.metadata.hdfs.entity.InvalidatedBlock;
 import io.hops.metadata.hdfs.entity.LeasePath;
 import io.hops.metadata.hdfs.entity.MetadataLogEntry;
-import io.hops.metadata.hdfs.entity.ProvenanceLogEntry;
+import io.hops.metadata.hdfs.entity.FileProvenanceEntry;
 import io.hops.metadata.hdfs.entity.QuotaUpdate;
 import io.hops.metadata.hdfs.entity.RetryCacheEntry;
 import io.hops.metadata.hdfs.entity.SubTreeOperation;
@@ -108,7 +107,7 @@ import io.hops.transaction.context.LeaseContext;
 import io.hops.transaction.context.LeasePathContext;
 import io.hops.transaction.context.MetadataLogContext;
 import io.hops.transaction.context.PendingBlockContext;
-import io.hops.transaction.context.ProvenanceLogContext;
+import io.hops.transaction.context.FileProvenanceContext;
 import io.hops.transaction.context.QuotaUpdateContext;
 import io.hops.transaction.context.ReplicaContext;
 import io.hops.transaction.context.ReplicaUnderConstructionContext;
@@ -146,6 +145,7 @@ import java.util.Map;
 import java.util.Properties;
 import org.apache.hadoop.hdfs.protocol.CacheDirective;
 import org.apache.hadoop.hdfs.server.namenode.CachePool;
+import io.hops.metadata.hdfs.dal.FileProvenanceDataAccess;
 
 public class HdfsStorageFactory {
 
@@ -347,8 +347,8 @@ public class HdfsStorageFactory {
         entityContexts.put(CachedBlock.class, new CachedBlockContext(
             (CachedBlockDataAccess) getDataAccess(CachedBlockDataAccess.class)));
         
-        entityContexts.put(ProvenanceLogEntry.class, new ProvenanceLogContext(
-          (ProvenanceLogDataAccess) getDataAccess(ProvenanceLogDataAccess.class)));
+        entityContexts.put(FileProvenanceEntry.class, new FileProvenanceContext(
+          (FileProvenanceDataAccess) getDataAccess(FileProvenanceDataAccess.class)));
         return entityContexts;
       }
 

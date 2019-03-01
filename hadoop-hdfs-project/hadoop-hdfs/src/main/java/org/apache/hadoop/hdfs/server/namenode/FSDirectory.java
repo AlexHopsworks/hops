@@ -28,7 +28,7 @@ import io.hops.metadata.hdfs.dal.INodeAttributesDataAccess;
 import io.hops.metadata.hdfs.dal.INodeDataAccess;
 import io.hops.metadata.hdfs.entity.INodeIdentifier;
 import io.hops.metadata.hdfs.entity.MetadataLogEntry;
-import io.hops.metadata.hdfs.entity.ProvenanceLogEntry;
+import io.hops.metadata.hdfs.entity.FileProvenanceEntry;
 import io.hops.metadata.hdfs.entity.QuotaUpdate;
 import io.hops.transaction.EntityManager;
 import io.hops.transaction.handler.HDFSOperationType;

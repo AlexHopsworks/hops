@@ -39,7 +39,7 @@ import io.hops.metadata.hdfs.entity.EncodingStatus;
 import io.hops.metadata.hdfs.entity.INodeIdentifier;
 import io.hops.metadata.hdfs.entity.MetadataLogEntry;
 import io.hops.metadata.hdfs.entity.ProjectedINode;
-import io.hops.metadata.hdfs.entity.ProvenanceLogEntry;
+import io.hops.metadata.hdfs.entity.FileProvenanceEntry;
 import io.hops.metadata.hdfs.entity.RetryCacheEntry;
 import io.hops.metadata.hdfs.entity.SubTreeOperation;
 import io.hops.resolvingcache.Cache;
@@ -1296,7 +1296,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
         }
       }
     }
-    inodeFile.logProvenanceEvent(ProvenanceLogEntry.Operation.getBlockLocations());
+    inodeFile.logProvenanceEvent(FileProvenanceEntry.Operation.getBlockLocations());
     return ret;
   }
 
@@ -3598,7 +3598,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     // close file and persist block allocations for this file
     pendingFile.toCompleteFile(now());
     closeFile(src, pendingFile);
-    pendingFile.logProvenanceEvent(ProvenanceLogEntry.Operation.append());
+    pendingFile.logProvenanceEvent(FileProvenanceEntry.Operation.append());
 
     if (!skipReplicationChecks) {
       blockManager.checkReplication(pendingFile);

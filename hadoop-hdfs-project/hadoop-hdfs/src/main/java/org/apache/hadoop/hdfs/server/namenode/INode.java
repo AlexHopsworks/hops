@@ -26,7 +26,7 @@ import io.hops.metadata.common.FinderType;
 import io.hops.metadata.hdfs.entity.EncodingStatus;
 import io.hops.metadata.hdfs.entity.INodeIdentifier;
 import io.hops.metadata.hdfs.entity.MetadataLogEntry;
-import io.hops.metadata.hdfs.entity.ProvenanceLogEntry;
+import io.hops.metadata.hdfs.entity.FileProvenanceEntry;
 import io.hops.transaction.EntityManager;
 import java.io.FileNotFoundException;
 import java.io.PrintStream;
@@ -849,7 +849,7 @@ public abstract void destroyAndCollectBlocks(BlocksMapUpdateInfo v, List<INode> 
     return null;
   }
 
-  public abstract void logProvenanceEvent(ProvenanceLogEntry.Operation op);
+  public abstract void logProvenanceEvent(FileProvenanceEntry.Operation op);
   public abstract Long getPartitionId();
 
   public abstract void setPartitionIdNoPersistance(long partitionId);

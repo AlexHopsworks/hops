@@ -21,7 +21,7 @@ import com.google.common.base.Preconditions;
 import io.hops.exception.StorageException;
 import io.hops.exception.TransactionContextException;
 import io.hops.metadata.hdfs.entity.MetadataLogEntry;
-import io.hops.metadata.hdfs.entity.ProvenanceLogEntry;
+import io.hops.metadata.hdfs.entity.FileProvenanceEntry;
 import io.hops.security.UsersGroups;
 import io.hops.transaction.EntityManager;
 import org.apache.hadoop.fs.permission.FsPermission;
@@ -330,7 +330,7 @@ public abstract class INodeWithAdditionalFields extends INode {
   }
   
   @Override
-  public void logProvenanceEvent(ProvenanceLogEntry.Operation op) {
+  public void logProvenanceEvent(FileProvenanceEntry.Operation op) {
     UserGroupInformation ugi;
     int operationUserId;
     try {
@@ -364,7 +364,7 @@ public abstract class INodeWithAdditionalFields extends INode {
     long projectId = projectINode.getId();
     long datasetId = datasetINode.getId();
 
-    ProvenanceLogEntry ple = new ProvenanceLogEntry(id, operationUserId, appId,
+    FileProvenanceEntry ple = new FileProvenanceEntry(id, operationUserId, appId,
       logicalTime, logicalTime, timestamp, timestamp, parentId, partitionId,
       projectId, datasetId, inodeName, operationUser, op);
     try {

@@ -19,18 +19,18 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.hops.exception.StorageException;
 import io.hops.exception.TransactionContextException;
-import io.hops.metadata.hdfs.dal.ProvenanceLogDataAccess;
-import io.hops.metadata.hdfs.entity.ProvenanceLogEntry;
+import io.hops.metadata.hdfs.entity.FileProvenanceEntry;
 import io.hops.transaction.lock.TransactionLocks;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+import io.hops.metadata.hdfs.dal.FileProvenanceDataAccess;
 
-public class ProvenanceLogContext extends BaseEntityContext<ProvenanceLogContext.DBKey, ProvenanceLogEntry> {
+public class FileProvenanceContext extends BaseEntityContext<FileProvenanceContext.DBKey, FileProvenanceEntry> {
 
   private static final long PROVENANCE_CACHE_EXPIRATION_TIME = 5000;
   private static final long PROVENANCE_CACHE_MAX_SIZE = 1000;
   //TODO Alex - add cache usage
-  private static final Cache<CacheKey, ProvenanceLogEntry> CACHE;
+  private static final Cache<CacheKey, FileProvenanceEntry> CACHE;
 
   static {
     CACHE = Caffeine.newBuilder()
@@ -38,7 +38,7 @@ public class ProvenanceLogContext extends BaseEntityContext<ProvenanceLogContext
       .maximumSize(PROVENANCE_CACHE_MAX_SIZE)
       .build();
   }
-  private final ProvenanceLogDataAccess<ProvenanceLogEntry> dataAccess;
+  private final FileProvenanceDataAccess<FileProvenanceEntry> dataAccess;
 
   class CacheKey {
 
@@ -142,12 +142,12 @@ public class ProvenanceLogContext extends BaseEntityContext<ProvenanceLogContext
     }
   }
 
-  public ProvenanceLogContext(ProvenanceLogDataAccess dataAccess) {
+  public FileProvenanceContext(FileProvenanceDataAccess dataAccess) {
     this.dataAccess = dataAccess;
   }
 
   @Override
-  public void add(ProvenanceLogEntry logEntry)
+  public void add(FileProvenanceEntry logEntry)
     throws TransactionContextException {
     DBKey dbKey = getKey(logEntry);
     CacheKey cacheKey = dbKey.getCacheKey();
@@ -163,7 +163,7 @@ public class ProvenanceLogContext extends BaseEntityContext<ProvenanceLogContext
   }
 
   @Override
-  DBKey getKey(ProvenanceLogEntry logEntry) {
+  DBKey getKey(FileProvenanceEntry logEntry) {
     return new DBKey(logEntry.getInodeId(), logEntry.getUserId(),
       logEntry.getAppId(), logEntry.getLogicalTime());
   }

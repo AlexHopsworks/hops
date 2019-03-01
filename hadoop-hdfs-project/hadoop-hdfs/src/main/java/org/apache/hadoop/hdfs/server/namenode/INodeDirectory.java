@@ -23,7 +23,7 @@ import io.hops.exception.StorageException;
 import io.hops.exception.TransactionContextException;
 import io.hops.metadata.hdfs.entity.INodeIdentifier;
 import io.hops.metadata.hdfs.entity.MetadataLogEntry;
-import io.hops.metadata.hdfs.entity.ProvenanceLogEntry;
+import io.hops.metadata.hdfs.entity.FileProvenanceEntry;
 import io.hops.transaction.EntityManager;
 import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.apache.hadoop.hdfs.DFSUtil;
@@ -433,7 +433,7 @@ public class INodeDirectory extends INodeWithAdditionalFields {
   
     if (logMetadataEvent) {
       node.logMetadataEvent(MetadataLogEntry.Operation.ADD);
-      node.logProvenanceEvent(ProvenanceLogEntry.Operation.create());
+      node.logProvenanceEvent(FileProvenanceEntry.Operation.create());
     }
 
     return true;
