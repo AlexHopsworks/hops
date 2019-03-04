@@ -363,12 +363,11 @@ public abstract class INodeWithAdditionalFields extends INode {
     String inodeName = getLocalName();
     long projectId = projectINode.getId();
     long datasetId = datasetINode.getId();
-
-    FileProvenanceEntry ple = new FileProvenanceEntry(id, operationUserId, appId,
+    FileProvenanceEntry fpe = new FileProvenanceEntry(id, operationUserId, appId,
       logicalTime, logicalTime, timestamp, timestamp, parentId, partitionId,
       projectId, datasetId, inodeName, operationUser, op);
     try {
-      EntityManager.add(ple);
+      EntityManager.add(fpe);
     } catch (IOException ex) {
       throw new RuntimeException("provenance log error3", ex);
     }
