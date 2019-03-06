@@ -345,15 +345,16 @@ public abstract class INodeWithAdditionalFields extends INode {
        appId = "notls";
     }
 
-    INode inode;
     INodeDirectory datasetINode;
     INodeDirectory projectINode;
     try {
-      datasetINode = getMetaEnabledParent();
-      if (datasetINode == null) {
-//        LOG.info("provenance log error - not a dataset - src:" 
-//          +  getFullPathName()+ " op:" + op);
-        return;
+      if (this instanceof INodeDirectory && ((INodeDirectory) this).isMetaEnabled()) {
+        datasetINode = (INodeDirectory) this;
+      } else {
+        datasetINode = getMetaEnabledParent();
+        if (datasetINode == null) {
+          return;
+        }
       }
       projectINode = datasetINode.getParent();
     } catch (IOException ex) {
