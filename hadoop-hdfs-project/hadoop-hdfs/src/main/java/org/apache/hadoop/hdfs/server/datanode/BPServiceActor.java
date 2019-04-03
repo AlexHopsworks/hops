@@ -20,9 +20,11 @@ package org.apache.hadoop.hdfs.server.datanode;
 import com.google.common.annotations.VisibleForTesting;
 import io.hops.leader_election.node.ActiveNode;
 import io.hops.leader_election.node.SortedActiveNodeList;
+
+import java.io.EOFException;
 import org.apache.commons.logging.Log;
 import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.hdfs.StorageType;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
@@ -38,6 +40,7 @@ import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.StorageBlockReport;
 import org.apache.hadoop.hdfs.server.protocol.StorageReceivedDeletedBlocks;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
+import org.apache.hadoop.hdfs.server.protocol.VolumeFailureSummary;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.util.Time;
@@ -45,7 +48,6 @@ import org.apache.hadoop.util.VersionInfo;
 import org.apache.hadoop.util.VersionUtil;
 
 import java.io.IOException;
-import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.net.SocketTimeoutException;
 import java.util.Collection;
@@ -258,14 +260,19 @@ class BPServiceActor implements Runnable {
       LOG.debug("Sending heartbeat with " + reports.length +
           " storage reports from service actor: " + this);
     }
-
+    
+    VolumeFailureSummary volumeFailureSummary = dn.getFSDataset()
+        .getVolumeFailureSummary();
+    int numFailedVolumes = volumeFailureSummary != null ?
+        volumeFailureSummary.getFailedStorageLocations().length : 0;
     return bpNamenode.sendHeartbeat(bpRegistration,
         reports,
         dn.getFSDataset().getCacheCapacity(),
         dn.getFSDataset().getCacheUsed(),
         dn.getXmitsInProgress(),
         dn.getXceiverCount(),
-        dn.getFSDataset().getNumFailedVolumes());
+        numFailedVolumes,
+        volumeFailureSummary);
   }
 
   //This must be called only by BPOfferService
@@ -448,7 +455,11 @@ class BPServiceActor implements Runnable {
         // Use returned registration from namenode with updated fields
         bpRegistration = bpNamenode.registerDatanode(bpRegistration);
         break;
-      } catch (SocketTimeoutException e) {  // namenode is busy
+      } catch(EOFException e) {  // namenode might have just restarted
+        LOG.info("Problem connecting to server: " + nnAddr + " :"
+            + e.getLocalizedMessage());
+        sleepAndLogInterrupts(1000, "connecting to server");
+      } catch(SocketTimeoutException e) {  // namenode is busy
         LOG.info("Problem connecting to server: " + nnAddr);
         sleepAndLogInterrupts(1000, "connecting to server");
       }

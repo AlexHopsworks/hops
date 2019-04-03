@@ -32,6 +32,7 @@ import org.apache.hadoop.fs.CreateFlag;
 import org.apache.hadoop.fs.FsServerDefaults;
 import org.apache.hadoop.fs.Options;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.fs.UnresolvedLinkException;
 import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.BatchedRemoteIterator.BatchedEntries;
@@ -91,12 +92,15 @@ import org.apache.hadoop.hdfs.server.protocol.NodeRegistration;
 import org.apache.hadoop.hdfs.server.protocol.StorageBlockReport;
 import org.apache.hadoop.hdfs.server.protocol.StorageReceivedDeletedBlocks;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
+import org.apache.hadoop.hdfs.server.protocol.VolumeFailureSummary;
 import org.apache.hadoop.io.EnumSetWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.ipc.ProtobufRpcEngine;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.ipc.Server;
 import org.apache.hadoop.ipc.WritableRpcEngine;
+import org.apache.hadoop.ipc.RefreshRegistry;
+import org.apache.hadoop.ipc.RefreshResponse;
 import org.apache.hadoop.net.Node;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.Groups;
@@ -109,6 +113,12 @@ import org.apache.hadoop.security.protocolPB.RefreshAuthorizationPolicyProtocolP
 import org.apache.hadoop.security.protocolPB.RefreshAuthorizationPolicyProtocolServerSideTranslatorPB;
 import org.apache.hadoop.security.protocolPB.RefreshUserMappingsProtocolPB;
 import org.apache.hadoop.security.protocolPB.RefreshUserMappingsProtocolServerSideTranslatorPB;
+import org.apache.hadoop.ipc.protocolPB.RefreshCallQueueProtocolPB;
+import org.apache.hadoop.ipc.protocolPB.RefreshCallQueueProtocolServerSideTranslatorPB;
+import org.apache.hadoop.ipc.proto.RefreshCallQueueProtocolProtos.RefreshCallQueueProtocolService;
+import org.apache.hadoop.ipc.protocolPB.GenericRefreshProtocolPB;
+import org.apache.hadoop.ipc.protocolPB.GenericRefreshProtocolServerSideTranslatorPB;
+import org.apache.hadoop.ipc.proto.GenericRefreshProtocolProtos.GenericRefreshProtocolService;
 import org.apache.hadoop.security.token.SecretManager.InvalidToken;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.tools.proto.GetUserMappingsProtocolProtos.GetUserMappingsProtocolService;
@@ -228,7 +238,17 @@ class NameNodeRpcServer implements NamenodeProtocols {
         RefreshUserMappingsProtocolService
             .newReflectiveBlockingService(refreshUserMappingXlator);
 
-    GetUserMappingsProtocolServerSideTranslatorPB getUserMappingXlator =
+    RefreshCallQueueProtocolServerSideTranslatorPB refreshCallQueueXlator = 
+        new RefreshCallQueueProtocolServerSideTranslatorPB(this);
+    BlockingService refreshCallQueueService = RefreshCallQueueProtocolService
+        .newReflectiveBlockingService(refreshCallQueueXlator);
+
+    GenericRefreshProtocolServerSideTranslatorPB genericRefreshXlator =
+        new GenericRefreshProtocolServerSideTranslatorPB(this);
+    BlockingService genericRefreshService = GenericRefreshProtocolService
+        .newReflectiveBlockingService(genericRefreshXlator);
+
+    GetUserMappingsProtocolServerSideTranslatorPB getUserMappingXlator = 
         new GetUserMappingsProtocolServerSideTranslatorPB(this);
     BlockingService getUserMappingService = GetUserMappingsProtocolService
         .newReflectiveBlockingService(getUserMappingXlator);
@@ -270,7 +290,12 @@ class NameNodeRpcServer implements NamenodeProtocols {
           refreshAuthService, serviceRpcServer);
       DFSUtil.addPBProtocol(conf, RefreshUserMappingsProtocolPB.class,
           refreshUserMappingService, serviceRpcServer);
-      DFSUtil.addPBProtocol(conf, GetUserMappingsProtocolPB.class,
+      // We support Refreshing call queue here in case the client RPC queue is full
+      DFSUtil.addPBProtocol(conf, RefreshCallQueueProtocolPB.class,
+          refreshCallQueueService, serviceRpcServer);
+      DFSUtil.addPBProtocol(conf, GenericRefreshProtocolPB.class,
+          genericRefreshService, serviceRpcServer);
+      DFSUtil.addPBProtocol(conf, GetUserMappingsProtocolPB.class, 
           getUserMappingService, serviceRpcServer);
       DFSUtil.addPBProtocol(conf, TraceAdminProtocolPB.class,
           traceAdminService, serviceRpcServer);
@@ -308,7 +333,11 @@ class NameNodeRpcServer implements NamenodeProtocols {
         refreshAuthService, clientRpcServer);
     DFSUtil.addPBProtocol(conf, RefreshUserMappingsProtocolPB.class,
         refreshUserMappingService, clientRpcServer);
-    DFSUtil.addPBProtocol(conf, GetUserMappingsProtocolPB.class,
+    DFSUtil.addPBProtocol(conf, RefreshCallQueueProtocolPB.class,
+        refreshCallQueueService, clientRpcServer);
+    DFSUtil.addPBProtocol(conf, GenericRefreshProtocolPB.class,
+        genericRefreshService, clientRpcServer);
+    DFSUtil.addPBProtocol(conf, GetUserMappingsProtocolPB.class, 
         getUserMappingService, clientRpcServer);
     DFSUtil.addPBProtocol(conf, TraceAdminProtocolPB.class,
         traceAdminService, clientRpcServer);
@@ -498,15 +527,15 @@ class NameNodeRpcServer implements NamenodeProtocols {
   }
 
   @Override // ClientProtocol
-  public LastBlockWithStatus append(String src, String clientName) throws IOException {
+  public LastBlockWithStatus append(String src, String clientName,
+      EnumSetWritable<CreateFlag> flag) throws IOException {
     checkNNStartup();
     String clientMachine = getClientMachine();
     if (stateChangeLog.isDebugEnabled()) {
-      stateChangeLog.debug(
-          "*DIR* NameNode.append: file " + src + " for " + clientName + " at " +
-              clientMachine);
+      stateChangeLog.debug("*DIR* NameNode.append: file "
+          +src+" for "+clientName+" at "+clientMachine);
     }
-    LastBlockWithStatus info = namesystem.appendFile(src, clientName, clientMachine);
+    LastBlockWithStatus info = namesystem.appendFile(src, clientName, clientMachine, flag.get());
     metrics.incrFilesAppended();
     return info;
   }
@@ -947,10 +976,11 @@ class NameNodeRpcServer implements NamenodeProtocols {
   }
 
   @Override // ClientProtocol
-  public void setQuota(String path, long namespaceQuota, long diskspaceQuota)
+  public void setQuota(String path, long namespaceQuota, long storagespaceQuota,
+                       StorageType type)
       throws IOException {
-      checkNNStartup();
-      namesystem.setQuota(path, namespaceQuota, diskspaceQuota);
+    checkNNStartup();
+    namesystem.setQuota(path, namespaceQuota, storagespaceQuota, type);
   }
   
   @Override // ClientProtocol
@@ -1019,12 +1049,12 @@ class NameNodeRpcServer implements NamenodeProtocols {
   @Override // DatanodeProtocol
   public HeartbeatResponse sendHeartbeat(DatanodeRegistration nodeReg,
       StorageReport[] reports, long dnCacheCapacity, long dnCacheUsed, int xmitsInProgress, int xceiverCount,
-      int failedVolumes) throws IOException {
+      int failedVolumes, VolumeFailureSummary volumeFailureSummary) throws IOException {
     checkNNStartup();
     verifyRequest(nodeReg);
 
     return namesystem.handleHeartbeat(nodeReg, reports, dnCacheCapacity, dnCacheUsed, xceiverCount, xmitsInProgress,
-        failedVolumes);
+        failedVolumes, volumeFailureSummary);
   }
 
   @Override // DatanodeProtocol
@@ -1173,6 +1203,23 @@ class NameNodeRpcServer implements NamenodeProtocols {
     LOG.info("Refreshing SuperUser proxy group mapping list ");
 
     ProxyUsers.refreshSuperUserGroupsConfiguration();
+  }
+
+  @Override // RefreshCallQueueProtocol
+  public void refreshCallQueue() {
+    LOG.info("Refreshing call queue.");
+
+    Configuration conf = new Configuration();
+    clientRpcServer.refreshCallQueue(conf);
+    if (this.serviceRpcServer != null) {
+      serviceRpcServer.refreshCallQueue(conf);
+    }
+  }
+
+  @Override // GenericRefreshProtocol
+  public Collection<RefreshResponse> refresh(String identifier, String[] args) {
+    // Let the registry handle as needed
+    return RefreshRegistry.defaultRegistry().dispatch(identifier, args);
   }
   
   @Override // GetUserMappingsProtocol

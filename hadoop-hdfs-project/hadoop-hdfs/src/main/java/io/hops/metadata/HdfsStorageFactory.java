@@ -34,7 +34,7 @@ import io.hops.resolvingcache.Cache;
 import io.hops.metadata.adaptor.BlockInfoDALAdaptor;
 import io.hops.metadata.adaptor.CacheDirectiveDALAdaptor;
 import io.hops.metadata.adaptor.CachePoolDALAdaptor;
-import io.hops.metadata.adaptor.INodeAttributeDALAdaptor;
+import io.hops.metadata.adaptor.DirectoryWithQuotaFeatureDALAdaptor;
 import io.hops.metadata.adaptor.INodeDALAdaptor;
 import io.hops.metadata.adaptor.LeaseDALAdaptor;
 import io.hops.metadata.adaptor.PendingBlockInfoDALAdaptor;
@@ -57,7 +57,6 @@ import io.hops.metadata.hdfs.dal.CachedBlockDataAccess;
 import io.hops.metadata.hdfs.dal.CorruptReplicaDataAccess;
 import io.hops.metadata.hdfs.dal.EncodingStatusDataAccess;
 import io.hops.metadata.hdfs.dal.ExcessReplicaDataAccess;
-import io.hops.metadata.hdfs.dal.INodeAttributesDataAccess;
 import io.hops.metadata.hdfs.dal.INodeDataAccess;
 import io.hops.metadata.hdfs.dal.InvalidateBlockDataAccess;
 import io.hops.metadata.hdfs.dal.LeaseDataAccess;
@@ -99,7 +98,7 @@ import io.hops.transaction.context.EncodingStatusContext;
 import io.hops.transaction.context.EntityContext;
 import io.hops.transaction.context.ExcessReplicaContext;
 import io.hops.transaction.context.HashBucketContext;
-import io.hops.transaction.context.INodeAttributesContext;
+import io.hops.transaction.context.DirectoryWithQuotaFeatureContext;
 import io.hops.transaction.context.INodeContext;
 import io.hops.transaction.context.InvalidatedBlockContext;
 import io.hops.transaction.context.LeSnapshot;
@@ -120,12 +119,9 @@ import io.hops.transaction.lock.LockFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
-import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
-import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstruction;
 import org.apache.hadoop.hdfs.server.blockmanagement.PendingBlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.ReplicaUnderConstruction;
 import org.apache.hadoop.hdfs.server.namenode.INode;
-import org.apache.hadoop.hdfs.server.namenode.INodeAttributes;
 import org.apache.hadoop.hdfs.server.namenode.INodeDirectory;
 import org.apache.hadoop.hdfs.server.namenode.INodeFile;
 import org.apache.hadoop.hdfs.server.namenode.INodeSymlink;
@@ -144,8 +140,12 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
 import org.apache.hadoop.hdfs.protocol.CacheDirective;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoContiguous;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoContiguousUnderConstruction;
 import org.apache.hadoop.hdfs.server.namenode.CachePool;
 import io.hops.metadata.hdfs.dal.FileProvenanceDataAccess;
+import io.hops.metadata.hdfs.dal.DirectoryWithQuotaFeatureDataAccess;
+import org.apache.hadoop.hdfs.server.namenode.DirectoryWithQuotaFeature;
 
 public class HdfsStorageFactory {
 
@@ -249,9 +249,9 @@ public class HdfsStorageFactory {
             PendingBlockDataAccess.class)));
     dataAccessAdaptors.put(INodeDataAccess.class, new INodeDALAdaptor(
         (INodeDataAccess) getDataAccess(INodeDataAccess.class)));
-    dataAccessAdaptors.put(INodeAttributesDataAccess.class,
-        new INodeAttributeDALAdaptor((INodeAttributesDataAccess) getDataAccess(
-            INodeAttributesDataAccess.class)));
+    dataAccessAdaptors.put(DirectoryWithQuotaFeatureDataAccess.class,
+        new DirectoryWithQuotaFeatureDALAdaptor((DirectoryWithQuotaFeatureDataAccess) getDataAccess(
+            DirectoryWithQuotaFeatureDataAccess.class)));
     dataAccessAdaptors.put(CacheDirectiveDataAccess.class, new CacheDirectiveDALAdaptor(
         (CacheDirectiveDataAccess) getDataAccess(CacheDirectiveDataAccess.class)));
     dataAccessAdaptors.put(CachePoolDataAccess.class, new CachePoolDALAdaptor(
@@ -267,8 +267,8 @@ public class HdfsStorageFactory {
 
         BlockInfoContext bic = new BlockInfoContext(
             (BlockInfoDataAccess) getDataAccess(BlockInfoDataAccess.class));
-        entityContexts.put(BlockInfo.class, bic);
-        entityContexts.put(BlockInfoUnderConstruction.class, bic);
+        entityContexts.put(BlockInfoContiguous.class, bic);
+        entityContexts.put(BlockInfoContiguousUnderConstruction.class, bic);
         entityContexts.put(ReplicaUnderConstruction.class,
             new ReplicaUnderConstructionContext(
                 (ReplicaUnderConstructionDataAccess) getDataAccess(
@@ -315,9 +315,9 @@ public class HdfsStorageFactory {
             new LeSnapshot.HdfsLESnapshot(
                 (LeDescriptorDataAccess) getDataAccess(
                     HdfsLeDescriptorDataAccess.class)));
-        entityContexts.put(INodeAttributes.class, new INodeAttributesContext(
-            (INodeAttributesDataAccess) getDataAccess(
-                INodeAttributesDataAccess.class)));
+        entityContexts.put(DirectoryWithQuotaFeature.class, new DirectoryWithQuotaFeatureContext(
+            (DirectoryWithQuotaFeatureDataAccess) getDataAccess(
+                DirectoryWithQuotaFeatureDataAccess.class)));
 
         entityContexts.put(EncodingStatus.class, new EncodingStatusContext(
             (EncodingStatusDataAccess) getDataAccess(

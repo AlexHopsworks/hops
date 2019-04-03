@@ -47,8 +47,6 @@ import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.UnregisteredNodeException;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor.BlockTargetPair;
-import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
-import org.apache.hadoop.hdfs.server.namenode.CachedBlock;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.Namesystem;
 import org.apache.hadoop.hdfs.server.protocol.BalancerBandwidthCommand;
@@ -82,6 +80,7 @@ import static io.hops.transaction.lock.LockFactory.BLK;
 import java.net.InetSocketAddress;
 import org.apache.hadoop.hdfs.server.namenode.CachedBlock;
 import org.apache.hadoop.hdfs.server.protocol.BlockIdCommand;
+import org.apache.hadoop.hdfs.server.protocol.VolumeFailureSummary;
 import org.apache.hadoop.net.DNSToSwitchMappingWithDependency;
 import org.apache.hadoop.net.NetUtils;
 import static org.apache.hadoop.util.Time.now;
@@ -231,17 +230,17 @@ public class DatanodeManager {
     this.fsClusterStats = newFSClusterStats();
         
     this.defaultXferPort = NetUtils.createSocketAddr(
-        conf.get(DFSConfigKeys.DFS_DATANODE_ADDRESS_KEY,
-            DFSConfigKeys.DFS_DATANODE_ADDRESS_DEFAULT)).getPort();
+          conf.getTrimmed(DFSConfigKeys.DFS_DATANODE_ADDRESS_KEY,
+              DFSConfigKeys.DFS_DATANODE_ADDRESS_DEFAULT)).getPort();
     this.defaultInfoPort = NetUtils.createSocketAddr(
-        conf.get(DFSConfigKeys.DFS_DATANODE_HTTP_ADDRESS_KEY,
-            DFSConfigKeys.DFS_DATANODE_HTTP_ADDRESS_DEFAULT)).getPort();
+          conf.getTrimmed(DFSConfigKeys.DFS_DATANODE_HTTP_ADDRESS_KEY,
+              DFSConfigKeys.DFS_DATANODE_HTTP_ADDRESS_DEFAULT)).getPort();
     this.defaultInfoSecurePort = NetUtils.createSocketAddr(
-        conf.get(DFSConfigKeys.DFS_DATANODE_HTTPS_ADDRESS_KEY,
+        conf.getTrimmed(DFSConfigKeys.DFS_DATANODE_HTTPS_ADDRESS_KEY,
             DFSConfigKeys.DFS_DATANODE_HTTPS_ADDRESS_DEFAULT)).getPort();
     this.defaultIpcPort = NetUtils.createSocketAddr(
-        conf.get(DFSConfigKeys.DFS_DATANODE_IPC_ADDRESS_KEY,
-            DFSConfigKeys.DFS_DATANODE_IPC_ADDRESS_DEFAULT)).getPort();
+          conf.getTrimmed(DFSConfigKeys.DFS_DATANODE_IPC_ADDRESS_KEY,
+              DFSConfigKeys.DFS_DATANODE_IPC_ADDRESS_DEFAULT)).getPort();
     try {
       this.hostFileManager.refresh(conf.get(DFSConfigKeys.DFS_HOSTS, ""),
           conf.get(DFSConfigKeys.DFS_HOSTS_EXCLUDE, ""));
@@ -434,8 +433,10 @@ public class DatanodeManager {
       while (lastActiveIndex > 0 && isInactive(di[lastActiveIndex])) {
           --lastActiveIndex;
       }
-      int activeLen = lastActiveIndex + 1;      
+      int activeLen = lastActiveIndex + 1;    
       networktopology.sortByDistance(client, b.getLocations(), activeLen);
+      // must update cache since we modified locations array
+      b.updateCachedStorageInfo();
     }
   }
   
@@ -1284,7 +1285,8 @@ public class DatanodeManager {
    */
   public DatanodeCommand[] handleHeartbeat(DatanodeRegistration nodeReg,
       StorageReport[] reports, final String blockPoolId, long cacheCapacity, long cacheUsed, int xceiverCount,
-      int maxTransfers, int failedVolumes) throws IOException {
+      int maxTransfers, int failedVolumes,
+      VolumeFailureSummary volumeFailureSummary) throws IOException {
     synchronized (heartbeatManager) {
       synchronized (datanodeMap) {
         DatanodeDescriptor nodeinfo = null;
@@ -1304,7 +1306,8 @@ public class DatanodeManager {
           return new DatanodeCommand[]{RegisterCommand.REGISTER};
         }
 
-        heartbeatManager.updateHeartbeat(nodeinfo, reports, cacheCapacity, cacheUsed, xceiverCount, failedVolumes);
+        heartbeatManager.updateHeartbeat(nodeinfo, reports, cacheCapacity, cacheUsed, xceiverCount, failedVolumes,
+                                         volumeFailureSummary);
 
         // If we are in safemode, do not send back any recovery / replication
         // requests. Don't even drain the existing queue of work.
@@ -1313,14 +1316,13 @@ public class DatanodeManager {
         }
 
         //check lease recovery
-        BlockInfoUnderConstruction[] blocks =
-            nodeinfo.getLeaseRecoveryCommand(Integer.MAX_VALUE);
+        BlockInfoContiguousUnderConstruction[] blocks = nodeinfo
+            .getLeaseRecoveryCommand(Integer.MAX_VALUE);
         if (blocks != null) {
-          BlockRecoveryCommand brCommand =
-              new BlockRecoveryCommand(blocks.length);
-          for (BlockInfoUnderConstruction b : blocks) {
+          BlockRecoveryCommand brCommand = new BlockRecoveryCommand(
+              blocks.length);
+          for (BlockInfoContiguousUnderConstruction b : blocks) {
             final DatanodeStorageInfo[] storages = getStorageInfosTx(b);
-
             // Skip stale nodes during recovery - not heart beated for some time (30s by default).
             final List<DatanodeStorageInfo> recoveryLocations =
                 new ArrayList<DatanodeStorageInfo>(storages.length);
@@ -1329,26 +1331,37 @@ public class DatanodeManager {
                 recoveryLocations.add(storages[i]);
               }
             }
+            // If we are performing a truncate recovery than set recovery fields
+            // to old block.
+            boolean truncateRecovery = b.getTruncateBlock() != null;
+            boolean copyOnTruncateRecovery = truncateRecovery &&
+                b.getTruncateBlock().getBlockId() != b.getBlockId();
+            ExtendedBlock primaryBlock = (copyOnTruncateRecovery) ?
+                new ExtendedBlock(blockPoolId, b.getTruncateBlock()) :
+                new ExtendedBlock(blockPoolId, b);
             // If we only get 1 replica after eliminating stale nodes, then choose all
             // replicas for recovery and let the primary data node handle failures.
+            DatanodeInfo[] recoveryInfos;
             if (recoveryLocations.size() > 1) {
               if (recoveryLocations.size() != storages.length) {
                 LOG.info("Skipped stale nodes for recovery : " +
                     (storages.length - recoveryLocations.size()));
               }
-              boolean isTruncate = b.getBlockUCState().equals(
-                  HdfsServerConstants.BlockUCState.BEING_TRUNCATED);
-              brCommand.add(new RecoveringBlock(
-                  new ExtendedBlock(blockPoolId, b),
-                  DatanodeStorageInfo.toDatanodeInfos(recoveryLocations),
-                  b.getBlockRecoveryId(), isTruncate));
+              recoveryInfos =
+                  DatanodeStorageInfo.toDatanodeInfos(recoveryLocations);
             } else {
               // If too many replicas are stale, then choose all replicas to participate
               // in block recovery.
-              brCommand.add(new RecoveringBlock(
-                  new ExtendedBlock(blockPoolId, b),
-                  DatanodeStorageInfo.toDatanodeInfos(storages),
-                  b.getBlockRecoveryId()));
+              recoveryInfos = DatanodeStorageInfo.toDatanodeInfos(storages);
+            }
+            if(truncateRecovery) {
+              Block recoveryBlock = (copyOnTruncateRecovery) ? b :
+                  b.getTruncateBlock();
+              brCommand.add(new RecoveringBlock(primaryBlock, recoveryInfos,
+                                                recoveryBlock));
+            } else {
+              brCommand.add(new RecoveringBlock(primaryBlock, recoveryInfos,
+                                                b.getBlockRecoveryId()));
             }
           }
           return new DatanodeCommand[] { brCommand };
@@ -1712,7 +1725,7 @@ public class DatanodeManager {
   }
 
   private DatanodeStorageInfo[] getStorageInfosTx(
-      final BlockInfoUnderConstruction b) throws IOException {
+      final BlockInfoContiguousUnderConstruction b) throws IOException {
     final DatanodeManager datanodeManager = this;
 
     return (DatanodeStorageInfo[]) new HopsTransactionalRequestHandler(

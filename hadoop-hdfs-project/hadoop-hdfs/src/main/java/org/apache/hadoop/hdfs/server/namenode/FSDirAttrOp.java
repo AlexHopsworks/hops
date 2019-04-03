@@ -34,6 +34,7 @@ import io.hops.transaction.lock.TransactionLockTypes.INodeResolveType;
 import io.hops.transaction.lock.TransactionLocks;
 import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.fs.PathIsNotDirectoryException;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.fs.UnresolvedLinkException;
 import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
@@ -43,6 +44,7 @@ import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
+import org.apache.hadoop.hdfs.util.EnumCounters;
 import org.apache.hadoop.security.AccessControlException;
 
 import java.io.FileNotFoundException;
@@ -50,6 +52,7 @@ import java.io.IOException;
 import java.util.Iterator;
 
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_ACCESSTIME_PRECISION_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_QUOTA_BY_STORAGETYPE_ENABLED_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_STORAGE_POLICY_ENABLED_KEY;
 import org.apache.hadoop.ipc.NotALeaderException;
 
@@ -350,14 +353,14 @@ public class FSDirAttrOp {
   }
 
   /**
-   * Set the namespace quota and diskspace quota for a directory.
+   * Set the namespace, storagespace and typespace quota for a directory.
    *
    * Note: This does not support ".inodes" relative path.
    */
-  static void setQuota(final FSDirectory fsd, String srcArg, final long nsQuota, final long dsQuota)
-      throws IOException {
-        if (fsd.isPermissionEnabled()) {
-    FSPermissionChecker pc = fsd.getPermissionChecker();
+  static void setQuota(final FSDirectory fsd, String srcArg, final long nsQuota, final long ssQuota,
+      final StorageType type) throws IOException {
+    if (fsd.isPermissionEnabled()) {
+      FSPermissionChecker pc = fsd.getPermissionChecker();
       pc.checkSuperuserPrivilege();
     }
 
@@ -398,7 +401,7 @@ public class FSDirAttrOp {
 
       final AbstractFileTree.IdCollectingCountingFileTree fileTree = new AbstractFileTree.IdCollectingCountingFileTree(
           fsd.getFSNamesystem(), subtreeRoot);
-      fileTree.buildUp();
+      fileTree.buildUp(fsd.getBlockStoragePolicySuite());
       Iterator<Long> idIterator = fileTree.getOrderedIds().descendingIterator();
       synchronized (idIterator) {
         fsd.getFSNamesystem().getQuotaUpdateManager().addPrioritizedUpdates(idIterator);
@@ -427,10 +430,9 @@ public class FSDirAttrOp {
         @Override
         public Object performTask() throws IOException {
 
-          INodeDirectory changed = unprotectedSetQuota(fsd, src, nsQuota, dsQuota, fileTree.getNamespaceCount(),
-              fileTree.getDiskspaceCount());
+          INodeDirectory changed = unprotectedSetQuota(fsd, src, nsQuota, ssQuota, fileTree.getUsedCounts(), type);
           if (changed != null) {
-            final Quota.Counts q = changed.getQuotaCounts();
+            final QuotaCounts q = changed.getQuotaCounts();
           }
           return null;
         }
@@ -490,7 +492,8 @@ public class FSDirAttrOp {
   }
 
   /**
-   * See {@link org.apache.hadoop.hdfs.protocol.ClientProtocol#setQuota(String, long, long)}
+   * See {@link org.apache.hadoop.hdfs.protocol.ClientProtocol#setQuota(String,
+   *     long, long, StorageType)}
    * for the contract.
    * Sets quota for for a directory.
    * @return INodeDirectory if any of the quotas have changed. null otherwise.
@@ -502,20 +505,30 @@ public class FSDirAttrOp {
    * @throws SnapshotAccessControlException if path is in RO snapshot
    */
   static INodeDirectory unprotectedSetQuota(
-      FSDirectory fsd, String src, long nsQuota, long dsQuota, long nsCount, long dsCount)
+      FSDirectory fsd, String src, long nsQuota, long ssQuota, QuotaCounts fileTreeUsage, StorageType type)
       throws FileNotFoundException, PathIsNotDirectoryException,
-      QuotaExceededException, UnresolvedLinkException, StorageException, TransactionContextException {
+      QuotaExceededException, UnresolvedLinkException, 
+      UnsupportedActionException, StorageException, TransactionContextException {
     if (!fsd.isQuotaEnabled()) {
       return null;
     }
     // sanity check
     if ((nsQuota < 0 && nsQuota != HdfsConstants.QUOTA_DONT_SET &&
          nsQuota != HdfsConstants.QUOTA_RESET) ||
-        (dsQuota < 0 && dsQuota != HdfsConstants.QUOTA_DONT_SET &&
-          dsQuota != HdfsConstants.QUOTA_RESET)) {
+        (ssQuota < 0 && ssQuota != HdfsConstants.QUOTA_DONT_SET &&
+          ssQuota != HdfsConstants.QUOTA_RESET)) {
       throw new IllegalArgumentException("Illegal value for nsQuota or " +
-                                         "dsQuota : " + nsQuota + " and " +
-                                         dsQuota);
+                                         "ssQuota : " + nsQuota + " and " +
+                                         ssQuota);
+    }
+    // sanity check for quota by storage type
+    if ((type != null) && (!fsd.isQuotaByStorageTypeEnabled() ||
+        nsQuota != HdfsConstants.QUOTA_DONT_SET)) {
+      throw new UnsupportedActionException(
+          "Failed to set quota by storage type because either" +
+          DFS_QUOTA_BY_STORAGETYPE_ENABLED_KEY + " is set to " +
+          fsd.isQuotaByStorageTypeEnabled() + " or nsQuota value is illegal " +
+          nsQuota);
     }
 
     String srcs = FSDirectory.normalizePath(src);
@@ -524,21 +537,32 @@ public class FSDirAttrOp {
     if (dirNode.isRoot() && nsQuota == HdfsConstants.QUOTA_RESET) {
       throw new IllegalArgumentException("Cannot clear namespace quota on root.");
     } else { // a directory inode
-      final Quota.Counts oldQuota = dirNode.getQuotaCounts();
-      final long oldNsQuota = oldQuota.get(Quota.NAMESPACE);
-      final long oldDsQuota = oldQuota.get(Quota.DISKSPACE);
+      final QuotaCounts oldQuota = dirNode.getQuotaCounts();
+      final long oldNsQuota = oldQuota.getNameSpace();
+      final long oldSsQuota = oldQuota.getStorageSpace();
+
       if (nsQuota == HdfsConstants.QUOTA_DONT_SET) {
         nsQuota = oldNsQuota;
       }
-      if (dsQuota == HdfsConstants.QUOTA_DONT_SET) {
-        dsQuota = oldDsQuota;
+      if (ssQuota == HdfsConstants.QUOTA_DONT_SET) {
+        ssQuota = oldSsQuota;
       }
-      if (oldNsQuota == nsQuota && oldDsQuota == dsQuota) {
+
+      // unchanged space/namespace quota
+      if (type == null && oldNsQuota == nsQuota && oldSsQuota == ssQuota) {
         return null;
       }
 
+      // unchanged type quota
+      if (type != null) {
+          EnumCounters<StorageType> oldTypeQuotas = oldQuota.getTypeSpaces();
+          if (oldTypeQuotas != null && oldTypeQuotas.get(type) == ssQuota) {
+              return null;
+          }
+      }
+      
       if (!dirNode.isRoot()) {
-        dirNode.setQuota(nsQuota, nsCount, dsQuota, dsCount);
+        dirNode.setQuota(fsd.getBlockStoragePolicySuite(), nsQuota, ssQuota, fileTreeUsage, type);
         INodeDirectory parent = (INodeDirectory) iip.getINode(-2);
         parent.replaceChild(dirNode); //to update db?
       }
@@ -562,8 +586,8 @@ public class FSDirAttrOp {
     // if replication > oldBR, then newBR == replication.
     // if replication < oldBR, we don't know newBR yet.
     if (replication > oldBR) {
-      long dsDelta = (replication - oldBR)*(file.diskspaceConsumed()/oldBR);
-      fsd.updateCount(iip, 0, dsDelta, true);
+      long dsDelta = file.storagespaceConsumed()/oldBR;
+      fsd.updateCount(iip, 0L, dsDelta, oldBR, replication, true);
     }
 
     file.setFileReplication(replication);
@@ -571,8 +595,8 @@ public class FSDirAttrOp {
     final short newBR = file.getBlockReplication();
     // check newBR < oldBR case.
     if (newBR < oldBR) {
-      long dsDelta = (newBR - oldBR)*(file.diskspaceConsumed()/newBR);
-      fsd.updateCount(iip, 0, dsDelta, true);
+      long dsDelta = file.storagespaceConsumed()/newBR;
+      fsd.updateCount(iip, 0L, dsDelta, oldBR, newBR, true);
     }
 
     if (blockRepls != null) {

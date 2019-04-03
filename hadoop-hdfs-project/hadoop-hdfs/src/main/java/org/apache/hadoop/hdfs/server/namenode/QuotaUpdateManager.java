@@ -40,8 +40,7 @@ import org.apache.hadoop.util.Daemon;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.ConcurrentLinkedQueue;
-
-import static org.apache.hadoop.util.ExitUtil.terminate;
+import org.apache.hadoop.fs.StorageType;
 
 /**
  * Daemon that is asynchronously updating the quota counts of directories.
@@ -92,12 +91,15 @@ public class QuotaUpdateManager {
     return IDsGeneratorFactory.getInstance().getUniqueQuotaUpdateID();
   }
 
-  public void addUpdate(final long inodeId, final long namespaceDelta,
-      final long diskspaceDelta)
+  public void addUpdate(final long inodeId, QuotaCounts counts)
       throws StorageException, TransactionContextException {
 
+    Map<QuotaUpdate.StorageType, Long> typeSpaces = new HashMap<>();
+    for(StorageType t: StorageType.asList()){
+      typeSpaces.put(QuotaUpdate.StorageType.valueOf(t.name()), counts.getTypeSpace(t));
+    }
     QuotaUpdate update =
-        new QuotaUpdate(nextId(), inodeId, namespaceDelta, diskspaceDelta);
+        new QuotaUpdate(nextId(), inodeId, counts.getNameSpace(), counts.getStorageSpace(), typeSpaces);
     EntityManager.add(update);
   }
 
@@ -108,6 +110,7 @@ public class QuotaUpdateManager {
       while (namesystem.isRunning()) {
         startTime = System.currentTimeMillis();
         try {
+          boolean rerunImmediatly = false;
           if (namesystem.isLeader()) {
             if (!prioritizedUpdates.isEmpty()) {
               Iterator<Long> iterator = prioritizedUpdates.poll();
@@ -118,12 +121,14 @@ public class QuotaUpdateManager {
                 iterator.notify();
               }
             }
-            processNextUpdateBatch();
+            rerunImmediatly = processNextUpdateBatch();
           }
-          long sleepDuration =
-              updateInterval - (System.currentTimeMillis() - startTime);
-          if (sleepDuration > 0) {
-            Thread.sleep(updateInterval);
+          //if there is parrent updates apply them immediately
+          if (!rerunImmediatly) {
+            long sleepDuration = updateInterval - (System.currentTimeMillis() - startTime);
+            if (sleepDuration > 0) {
+              Thread.sleep(updateInterval);
+            }
           }
         } catch (InterruptedException ie) {
           LOG.warn("QuotaUpdateMonitor thread received InterruptedException.",
@@ -169,7 +174,7 @@ public class QuotaUpdateManager {
     applyBatchedUpdate(quotaUpdates);
   }
 
-  private void processNextUpdateBatch() throws IOException {
+  private boolean processNextUpdateBatch() throws IOException {
     LightWeightRequestHandler findHandler =
         new LightWeightRequestHandler(HDFSOperationType.GET_NEXT_QUOTA_BATCH) {
           @Override
@@ -183,30 +188,34 @@ public class QuotaUpdateManager {
 
     List<QuotaUpdate> quotaUpdates = (List<QuotaUpdate>) findHandler.handle();
     Collections.sort(quotaUpdates, quotaUpdateComparator);
-
+    boolean rerunImmediatly = false;
     ArrayList<QuotaUpdate> batch = new ArrayList<>();
     for (QuotaUpdate update : quotaUpdates) {
       if (batch.size() == 0 ||
           batch.get(0).getInodeId() == update.getInodeId()) {
         batch.add(update);
       } else {
-        applyBatchedUpdate(batch);
+        rerunImmediatly = rerunImmediatly || applyBatchedUpdate(batch);
         batch = new ArrayList<>();
         batch.add(update);
       }
     }
 
     if (batch.size() != 0) {
-      applyBatchedUpdate(batch);
+      rerunImmediatly = rerunImmediatly || applyBatchedUpdate(batch);
     }
+    if(quotaUpdates.size()==updateLimit){
+      rerunImmediatly = true;
+    }
+    return rerunImmediatly;
   }
 
-  private void applyBatchedUpdate(final List<QuotaUpdate> updates)
+  private boolean applyBatchedUpdate(final List<QuotaUpdate> updates)
       throws IOException {
     if (updates.size() == 0) {
-      return;
+      return false;
     }
-    new HopsTransactionalRequestHandler(HDFSOperationType.APPLY_QUOTA_UPDATE) {
+    return (boolean) new HopsTransactionalRequestHandler(HDFSOperationType.APPLY_QUOTA_UPDATE) {
       INodeIdentifier iNodeIdentifier;
 
       @Override
@@ -240,45 +249,50 @@ public class QuotaUpdateManager {
           return null;
         }
 
-        long namespaceDelta = 0;
-        long diskspaceDelta = 0;
+        QuotaCounts counts = new QuotaCounts.Builder().build();
         for (QuotaUpdate update : updates) {
-          namespaceDelta += update.getNamespaceDelta();
-          diskspaceDelta += update.getDiskspaceDelta();
+          counts.addStorageSpace(update.getStorageSpaceDelta());
+          counts.addNameSpace(update.getNamespaceDelta());
+          
+          for (Map.Entry<QuotaUpdate.StorageType, Long> entry : update.getTypeSpaces().entrySet()) {
+            counts.addTypeSpace(StorageType.valueOf(entry.getKey().name()), entry.getValue());
+          }
           LOG.debug("handling " + update);
           EntityManager.remove(update);
         }
 
         if (dir == null) {
-          LOG.debug("dropping update for " + updates.get(0) + " ns " +
-              namespaceDelta + " ds " + diskspaceDelta +
-              " because of deletion");
-          return null;
-        }
-        if (namespaceDelta == 0 && diskspaceDelta == 0) {
+          LOG.debug("dropping update for " + updates.get(0) + " quota " + counts + " because of deletion");
           return null;
         }
 
         if (dir != null && dir.isQuotaSet()) {
           final DirectoryWithQuotaFeature q = dir.getDirectoryWithQuotaFeature();
           if (q != null) {
-            INodeAttributes attributes = q.getINodeAttributes(dir);
-            attributes.setNsCount(attributes.getNsCount() + namespaceDelta);
-            attributes.setDiskspace(attributes.getDiskspace() + diskspaceDelta);
+            q.addSpaceConsumed2Cache(counts);
+            
             LOG.debug("applying aggregated update for directory " + dir.getId() +
-                " with namespace delta " + namespaceDelta +
-                " and diskspace delta " + diskspaceDelta);
+                " with quota " + counts);
           }
         }
 
+        boolean hasParentUpdate = false;
         if (dir != null && dir.getId() != INodeDirectory.ROOT_INODE_ID) {
-          QuotaUpdate parentUpdate =
-              new QuotaUpdate(nextId(), dir.getParentId(), namespaceDelta,
-                  diskspaceDelta);
-          EntityManager.add(parentUpdate);
-          LOG.debug("adding parent update " + parentUpdate);
+          boolean allNull = counts.getStorageSpace()==0 && counts.getNameSpace()==0;
+          Map<QuotaUpdate.StorageType, Long > typeSpace = new HashMap<>();
+          for(StorageType type : StorageType.asList()){
+            typeSpace.put(QuotaUpdate.StorageType.valueOf(type.name()), counts.getTypeSpace(type));
+            allNull = allNull && counts.getTypeSpace(type)==0;
+          }
+          if (!allNull) {
+            QuotaUpdate parentUpdate = new QuotaUpdate(nextId(), dir.getParentId(), counts.getNameSpace(),
+                counts.getStorageSpace(), typeSpace);
+            EntityManager.add(parentUpdate);
+            hasParentUpdate = true;
+            LOG.debug("adding parent update " + parentUpdate);
+          }
         }
-        return null;
+        return hasParentUpdate;
       }
     }.handle(this);
   }

@@ -24,8 +24,8 @@ import java.util.Collection;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
-import org.apache.hadoop.hdfs.StorageType;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.BlockLocalPathInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
@@ -49,6 +49,7 @@ import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.ReplicaRecoveryInfo;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
+import org.apache.hadoop.hdfs.server.protocol.VolumeFailureSummary;
 import org.apache.hadoop.util.DiskChecker.DiskErrorException;
 import org.apache.hadoop.util.ReflectionUtils;
 
@@ -95,27 +96,30 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
     }
   }
 
-  /**
-   * Create rolling logs.
-   *
-   * @param prefix
-   *     the prefix of the log names.
-   * @return rolling logs
-   */
-  public RollingLogs createRollingLogs(String bpid, String prefix)
-      throws IOException;
-
-  /**
-   * @return a list of volumes.
-   */
+  /** @return a list of volumes. */
   public List<V> getVolumes();
 
-  /** Add an array of StorageLocation to FsDataset. */
+  /**
+   * Add a new volume to the FsDataset.<p/>
+   *
+   * If the FSDataset supports block scanning, this function registers
+   * the new volume with the block scanner.
+   *
+   * @param location      The storage location for the new volume.
+   * @param nsInfos       Namespace information for the new volume.
+   */
   public void addVolume(
       final StorageLocation location,
       final List<NamespaceInfo> nsInfos) throws IOException;
 
-  /** Removes a collection of volumes from FsDataset. */
+  /**
+   * Removes a collection of volumes from FsDataset.
+   *
+   * If the FSDataset supports block scanning, this function removes
+   * the volumes from the block scanner.
+   *
+   * @param volumes      The storage locations of the volumes to remove.
+   */
   public void removeVolumes(Collection<StorageLocation> volumes);
 
   /** @return a storage with the given storage ID */
@@ -136,8 +140,13 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
   public Map<String, Object> getVolumeInfoMap();
 
   /**
-   * @return a list of finalized blocks for the given block pool.
+   * Returns info about volume failures.
+   *
+   * @return info about volume failures, possibly null
    */
+  VolumeFailureSummary getVolumeFailureSummary();
+
+  /** @return a list of finalized blocks for the given block pool. */
   public List<FinalizedReplica> getFinalizedBlocks(String bpid);
 
   /**
@@ -479,7 +488,7 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
    * @return the ID of storage that stores the block
    */
   public String updateReplicaUnderRecovery(ExtendedBlock oldBlock,
-      long recoveryId, long newLength) throws IOException;
+      long recoveryId, long newBlockId, long newLength) throws IOException;
 
   /**
    * add new block pool ID
@@ -573,4 +582,17 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
      */
     public ReplicaInfo moveBlockAcrossStorage(final ExtendedBlock block,
         StorageType targetStorageType) throws IOException;
+
+  /**
+   * Set a block to be pinned on this datanode so that it cannot be moved
+   * by Balancer/Mover.
+   *
+   * It is a no-op when dfs.datanode.block-pinning.enabled is set to false.
+   */
+  public void setPinning(ExtendedBlock block) throws IOException;
+
+  /**
+   * Check whether the block was pinned
+   */
+  public boolean getPinning(ExtendedBlock block) throws IOException;
 }

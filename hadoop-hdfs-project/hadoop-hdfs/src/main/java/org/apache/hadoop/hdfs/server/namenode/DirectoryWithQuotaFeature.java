@@ -17,56 +17,186 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
+import org.apache.hadoop.fs.StorageType;
 import io.hops.exception.StorageException;
 import io.hops.exception.TransactionContextException;
+import io.hops.metadata.common.FinderType;
 import io.hops.transaction.EntityManager;
 import org.apache.hadoop.hdfs.protocol.DSQuotaExceededException;
 import org.apache.hadoop.hdfs.protocol.NSQuotaExceededException;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
+import org.apache.hadoop.hdfs.protocol.QuotaByStorageTypeExceededException;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+import org.apache.hadoop.hdfs.util.EnumCounters;
 
 /**
  * Quota feature for {@link INodeDirectory}
  */
 public class DirectoryWithQuotaFeature implements INode.Feature {
   
-  public DirectoryWithQuotaFeature() {
+  public static enum Finder implements FinderType<DirectoryWithQuotaFeature> {
+
+    ByINodeId,
+    ByINodeIds;
+
+    @Override
+    public Class getType() {
+      return DirectoryWithQuotaFeature.class;
+    }
+
+    @Override
+    public Annotation getAnnotated() {
+      switch (this) {
+        case ByINodeId:
+          return Annotation.PrimaryKey;
+        case ByINodeIds:
+          return Annotation.Batched;
+        default:
+          throw new IllegalStateException();
+      }
+    }
+
   }
   
-  DirectoryWithQuotaFeature(final INodeDirectory dir, long nsQuota, long nsCount, long dsQuota, long dsCount)
-    throws StorageException, TransactionContextException {
-    createINodeAttributes(dir, nsQuota, nsCount, dsQuota, dsCount);
-    setQuota(dir, nsQuota, dsQuota);
-  }
+  public static final long DEFAULT_NAMESPACE_QUOTA = Long.MAX_VALUE;
+  public static final long DEFAULT_STORAGE_SPACE_QUOTA = HdfsConstants.QUOTA_RESET;
+
+  private QuotaCounts quota;
+  private QuotaCounts usage;
+  private Long inodeId;
   
+  public static class Builder {
+    private QuotaCounts quota;
+    private QuotaCounts usage;
+    private Long inodeId;
+
+    public Builder(Long inodeId) {
+      this.inodeId = inodeId;
+      this.quota = new QuotaCounts.Builder().nameSpace(DEFAULT_NAMESPACE_QUOTA).
+          storageSpace(DEFAULT_STORAGE_SPACE_QUOTA).
+          typeSpaces(DEFAULT_STORAGE_SPACE_QUOTA).build();
+      this.usage = new QuotaCounts.Builder().nameSpace(1).build();
+    }
+
+    public Builder nameSpaceQuota(long nameSpaceQuota) {
+      this.quota.setNameSpace(nameSpaceQuota);
+      return this;
+    }
+
+    public Builder storageSpaceQuota(long spaceQuota) {
+      this.quota.setStorageSpace(spaceQuota);
+      return this;
+    }
+
+    public Builder typeQuotas(EnumCounters<StorageType> typeQuotas) {
+      this.quota.setTypeSpaces(typeQuotas);
+      return this;
+    }
+
+    public Builder typeQuota(StorageType type, long quota) {
+      this.quota.setTypeSpace(type, quota);
+      return this;
+    }
+
+    public Builder nameSpaceUsage(long nameSpaceQuota) {
+      this.usage.setNameSpace(nameSpaceQuota);
+      return this;
+    }
+
+    public Builder spaceUsage(long spaceQuota) {
+      this.usage.setStorageSpace(spaceQuota);
+      return this;
+    }
+
+    public Builder typeUsages(EnumCounters<StorageType> typeQuotas) {
+      this.usage.setTypeSpaces(typeQuotas);
+      return this;
+    }
+    
+    public Builder typeUsage(StorageType type, long quota) {
+      this.usage.setTypeSpace(type, quota);
+      return this;
+    }
+    
+    public DirectoryWithQuotaFeature build(){
+      return new DirectoryWithQuotaFeature(this);
+    }
+    
+    public DirectoryWithQuotaFeature build(boolean save) throws TransactionContextException, StorageException {
+      if (save) {
+        return new DirectoryWithQuotaFeature(this, save);
+      } else {
+        return build();
+      }
+    }
+  }
+
+    private DirectoryWithQuotaFeature(Builder builder) {
+    this.inodeId = builder.inodeId;
+    this.quota = builder.quota;
+    this.usage = builder.usage;
+  }
+
+  
+  private DirectoryWithQuotaFeature(Builder builder, boolean save) throws TransactionContextException, StorageException {
+    this.inodeId = builder.inodeId;
+    this.quota = builder.quota;
+    this.usage = builder.usage;
+    if(save){
+      save();
+    }
+  }
+
   /** @return the quota set or null if it is not set. */
-  Quota.Counts getQuota(INodeDirectory dir) throws StorageException, TransactionContextException {
-    return getINodeAttributes(dir).getQuotaCounts();
+  public QuotaCounts getQuota() {
+    return new QuotaCounts.Builder().quotaCount(this.quota).build();
   }
   
   /**
    * Set the directory's quota
    *
    * @param nsQuota Namespace quota to be set
-   * @param dsQuota Diskspace quota to be set
+   * @param ssQuota Storagespace quota to be set
+   * @param type Storage type of the storage space quota to be set.
+   *             To set storagespace/namespace quota, type must be null.
    */
-  void setQuota(final INodeDirectory dir, Long nsQuota, Long dsQuota)
+  void setQuota(long nsQuota, long ssQuota, StorageType type) 
       throws StorageException, TransactionContextException {
-    getINodeAttributes(dir).setNsQuota(nsQuota);
-    getINodeAttributes(dir).setDsQuota(dsQuota);
+    if (type != null) {
+      this.quota.setTypeSpace(type, ssQuota);
+    } else {
+      setQuota(nsQuota, ssQuota);
+    }
+    save();
   }
-  
-  Quota.Counts addNamespaceDiskspace(final INodeDirectory dir, Quota.Counts counts)
-    throws StorageException, TransactionContextException {
-    INodeAttributes iNodeAttributes = getINodeAttributes(dir);
-    counts.add(Quota.NAMESPACE, iNodeAttributes.getNsCount());
-    counts.add(Quota.DISKSPACE, iNodeAttributes.getDiskspace());
-    return counts;
+
+  void setQuota(long nsQuota, long ssQuota) throws TransactionContextException, StorageException {
+    this.quota.setNameSpace(nsQuota);
+    this.quota.setStorageSpace(ssQuota);
+    save();
   }
-  
-  INode.DirCounts spaceConsumedInTree(final INodeDirectory dir, INode.DirCounts counts)
-    throws StorageException, TransactionContextException {
-    counts.nsCount += getINodeAttributes(dir).getNsCount();
-    counts.dsCount += getINodeAttributes(dir).getDiskspace();
+
+  void setQuota(long quota, StorageType type) throws TransactionContextException, StorageException {
+    this.quota.setTypeSpace(type, quota);
+    save();
+  }
+
+  /** Set storage type quota in a batch. (Only used by FSImage load)
+   *
+   * @param tsQuotas type space counts for all storage types supporting quota
+   */
+  void setQuota(EnumCounters<StorageType> tsQuotas) throws TransactionContextException, StorageException {
+    this.quota.setTypeSpaces(tsQuotas);
+    save();
+  }
+
+  /**
+   * Add current quota usage to counts and return the updated counts
+   * @param counts counts to be added with current quota usage
+   * @return counts that have been added with the current qutoa usage
+   */
+  QuotaCounts AddCurrentSpaceUsage(QuotaCounts counts) {
+    counts.add(this.usage);
     return counts;
   }
   
@@ -78,35 +208,18 @@ public class DirectoryWithQuotaFeature implements INode.Feature {
     dir.computeDirectoryContentSummary(summary);
     // Check only when the content has not changed in the middle.
     if (oldYieldCount == summary.getYieldCount()) {
-      checkDiskspace(dir, summary.getCounts().get(Content.DISKSPACE) - original);
+      checkStoragespace(dir, summary.getCounts().get(Content.DISKSPACE) - original);
     }
     return summary;
   }
-  
-  private void checkDiskspace(final INodeDirectory dir, final long computed)
-    throws StorageException, TransactionContextException {
-    long diskspace = diskspaceConsumed(dir);
-    if (-1 != getQuota(dir).get(Quota.DISKSPACE) && diskspace != computed) {
-      NameNode.LOG.error("BUG: Inconsistent diskspace for directory "
-          + dir.getFullPathName() + ". Cached = " + diskspace
+
+  private void checkStoragespace(final INodeDirectory dir, final long computed) 
+      throws StorageException, TransactionContextException {
+    if (-1 != quota.getStorageSpace() && usage.getStorageSpace() != computed) {
+      NameNode.LOG.error("BUG: Inconsistent storagespace for directory "
+          + dir.getFullPathName() + ". Cached = " + usage.getStorageSpace()
           + " != Computed = " + computed);
     }
-  }
-  
-  /**
-   * Get the number of names in the subtree rooted at this directory
-   * @return the size of the subtree rooted at this directory
-   * @throws StorageException
-   * @throws TransactionContextException
-   */
-  Long numItemsInTree(final INodeDirectory dir)
-    throws StorageException, TransactionContextException {
-    return getINodeAttributes(dir).getNsCount();
-  }
-  
-  Long diskspaceConsumed(final INodeDirectory dir)
-    throws StorageException, TransactionContextException {
-    return getINodeAttributes(dir).getDiskspace();
   }
   
   /**
@@ -118,99 +231,149 @@ public class DirectoryWithQuotaFeature implements INode.Feature {
    * @throws StorageException
    * @throws TransactionContextException
    */
-  void addSpaceConsumed(final INodeDirectory dir, final Long nsDelta, final Long dsDelta)
+  void addSpaceConsumed(final INodeDirectory dir, final QuotaCounts counts)
     throws StorageException, TransactionContextException {
     if (dir.isQuotaSet()) {
-      setSpaceConsumed(dir, getINodeAttributes(dir).getNsCount() + nsDelta,
-          getINodeAttributes(dir).getDiskspace() + dsDelta);
-    }
+      // The following steps are important:
+      // check quotas in this inode and all ancestors before changing counts
+      // so that no change is made if there is any quota violation.
+      // (1) verify quota in this inode
+//      if (verify) {
+//        verifyQuota(counts);
+//      }
+      // (2) verify quota and then add count in ancestors
+      //dir.addSpaceConsumed2Parent(counts);
+      // (3) add count in this inode
+      addSpaceConsumed2Cache(counts);
+    } 
   }
   
-  /**
-   * Sets the namespace and diskspace taken by the directory rooted
-   * at this INode. This should be used carefully. It does not check
+  /** Update the space/namespace/type usage of the tree
+   * @param delta the change of the namespace/space/type usage
+   */
+  public void addSpaceConsumed2Cache(QuotaCounts delta) throws TransactionContextException, StorageException {
+    usage.add(delta);
+    save();
+  }
+
+  /** 
+   * Sets namespace and storagespace take by the directory rooted
+   * at this INode. This should be used carefully. It does not check 
    * for quota violations.
    *
    * @param dir Directory i-node
    * @param namespace size of the directory to be set
-   * @param diskspace disk space take by all the nodes under this directory
-   * @throws StorageException
-   * @throws TransactionContextException
+   * @param storagespace storage space take by all the nodes under this directory
+   * @param typespaces counters of storage type usage
    */
-  void setSpaceConsumed(final INodeDirectory dir, final Long namespace, final Long diskspace)
-    throws StorageException, TransactionContextException {
-    getINodeAttributes(dir).setNsCount(namespace);
-    getINodeAttributes(dir).setDiskspace(diskspace);
+  void setSpaceConsumed(long namespace, long storagespace,
+      EnumCounters<StorageType> typespaces) {
+    usage.setNameSpace(namespace);
+    usage.setStorageSpace(storagespace);
+    usage.setTypeSpaces(typespaces);
   }
   
-  public Quota.Counts getSpaceConsumed(final INodeDirectory dir)
-    throws StorageException, TransactionContextException {
-    INodeAttributes iNodeAttributes = getINodeAttributes(dir);
-    return Quota.Counts.newInstance(iNodeAttributes.getNsCount(), iNodeAttributes.getDiskspace());
+  void setSpaceConsumed(QuotaCounts c) {
+    usage.setNameSpace(c.getNameSpace());
+    usage.setStorageSpace(c.getStorageSpace());
+    usage.setTypeSpaces(c.getTypeSpaces());
+  }
+
+  /** @return the namespace and storagespace and typespace consumed. */
+  public QuotaCounts getSpaceConsumed() {
+    return new QuotaCounts.Builder().quotaCount(usage).build();
   }
   
-  void setSpaceConsumedNoPersistance(final INodeDirectory dir, Long namespace, Long diskSpace)
-    throws StorageException, TransactionContextException {
-    getINodeAttributes(dir).setNsCountNoPersistance(namespace);
-    getINodeAttributes(dir).setDiskspaceNoPersistance(diskSpace);
+  /** Verify if the namespace quota is violated after applying delta. */
+  private void verifyNamespaceQuota(long delta) throws NSQuotaExceededException {
+    if (Quota.isViolated(quota.getNameSpace(), usage.getNameSpace(), delta)) {
+      throw new NSQuotaExceededException(quota.getNameSpace(),
+          usage.getNameSpace() + delta);
+    }
+  }
+  /** Verify if the storagespace quota is violated after applying delta. */
+  private void verifyStoragespaceQuota(long delta) throws DSQuotaExceededException {
+    if (Quota.isViolated(quota.getStorageSpace(), usage.getStorageSpace(), delta)) {
+      throw new DSQuotaExceededException(quota.getStorageSpace(),
+          usage.getStorageSpace() + delta);
+    }
   }
   
+  private void verifyQuotaByStorageType(EnumCounters<StorageType> typeDelta)
+      throws QuotaByStorageTypeExceededException {
+    if (!isQuotaByStorageTypeSet()) {
+      return;
+    }
+    for (StorageType t: StorageType.getTypesSupportingQuota()) {
+      if (!isQuotaByStorageTypeSet(t)) {
+        continue;
+      }
+      if (Quota.isViolated(quota.getTypeSpace(t), usage.getTypeSpace(t),
+          typeDelta.get(t))) {
+        throw new QuotaByStorageTypeExceededException(
+          quota.getTypeSpace(t), usage.getTypeSpace(t) + typeDelta.get(t), t);
+      }
+    }
+  }
   /**
-   * Verify if namespace or diskspace quota is violated
-   * after applying deltas.
-   *
-   * @throws QuotaExceededException
-   * @throws StorageException
-   * @throws TransactionContextException
+   * @throws QuotaExceededException if namespace, storagespace or storage type
+   * space quota is violated after applying the deltas.
    */
-  void verifyQuota(final INodeDirectory dir, final Long nsDelta, final Long dsDelta)
+  void verifyQuota(QuotaCounts counts)
     throws QuotaExceededException, StorageException, TransactionContextException {
-    final INodeAttributes iNodeAttributes = getINodeAttributes(dir);
-    final Quota.Counts counts = getQuota(dir);
-    verifyNamespaceQuota(iNodeAttributes, counts, nsDelta);
-    verifyDiskspaceQuota(iNodeAttributes, counts, dsDelta);
+    verifyNamespaceQuota(counts.getNameSpace());
+    verifyStoragespaceQuota(counts.getStorageSpace());
+    verifyQuotaByStorageType(counts.getTypeSpaces());
   }
   
-  private void verifyNamespaceQuota(final INodeAttributes iNodeAttributes, final Quota.Counts counts,
-      final Long nsDelta) throws NSQuotaExceededException {
-    final Long newNamespace = iNodeAttributes.getNsCount() + nsDelta;
-    final Long namespace = counts.get(Quota.NAMESPACE);
-    if (namespace >= 0 && namespace < newNamespace) {
-      throw new NSQuotaExceededException(namespace, newNamespace);
+  boolean isQuotaSet() {
+    return quota.anyNsSsCountGreaterOrEqual(0) ||
+        quota.anyTypeSpaceCountGreaterOrEqual(0);
+  }
+
+  boolean isQuotaByStorageTypeSet() {
+    return quota.anyTypeSpaceCountGreaterOrEqual(0);
+  }
+
+  boolean isQuotaByStorageTypeSet(StorageType t) {
+    return quota.getTypeSpace(t) >= 0;
+  }
+
+  private String namespaceString() {
+    return "namespace: " + (quota.getNameSpace() < 0? "-":
+        usage.getNameSpace() + "/" + quota.getNameSpace());
+  }
+  private String storagespaceString() {
+    return "storagespace: " + (quota.getStorageSpace() < 0? "-":
+        usage.getStorageSpace() + "/" + quota.getStorageSpace());
+  }
+
+  private String typeSpaceString() {
+    StringBuilder sb = new StringBuilder();
+    for (StorageType t : StorageType.getTypesSupportingQuota()) {
+      sb.append("StorageType: " + t +
+          (quota.getTypeSpace(t) < 0? "-":
+          usage.getTypeSpace(t) + "/" + usage.getTypeSpace(t)));
     }
+    return sb.toString();
+  }
+
+  @Override
+  public String toString() {
+    return "Quota[" + namespaceString() + ", " + storagespaceString() +
+        ", " + typeSpaceString() + "]";
   }
   
-  private void verifyDiskspaceQuota(final INodeAttributes iNodeAttributes, final Quota.Counts counts,
-      final Long dsDelta) throws DSQuotaExceededException {
-    final Long newDiskspace = iNodeAttributes.getDiskspace() + dsDelta;
-    final Long diskSpace = counts.get(Quota.DISKSPACE);
-    if (diskSpace >= 0 && diskSpace < newDiskspace) {
-      throw new DSQuotaExceededException(diskSpace, newDiskspace);
-    }
+  void remove() throws StorageException, TransactionContextException{
+    EntityManager.remove(this);
   }
   
-  public INodeAttributes getINodeAttributes(final INodeDirectory dir)
-    throws StorageException, TransactionContextException {
-    return EntityManager.find(INodeAttributes.Finder.ByINodeId, dir.getId());
+  void save() throws TransactionContextException, StorageException{
+    EntityManager.update(this);
   }
-  
-  private void createINodeAttributes(final INodeDirectory dir, final Long nsQuota, final Long nameSpace,
-      final Long dsQuota, final Long diskSpace) throws StorageException, TransactionContextException {
-    INodeAttributes iNodeAttributes =
-        new INodeAttributes(dir.getId(), dir.isInTree(), nsQuota, nameSpace, dsQuota, diskSpace);
-    EntityManager.add(iNodeAttributes);
+
+  public Long getInodeId() {
+    return inodeId;
   }
-  
-  void removeAttributes(final INodeDirectory dir)
-    throws StorageException, TransactionContextException {
-    INodeAttributes iNodeAttributes = getINodeAttributes(dir);
-    if (iNodeAttributes != null) {
-      iNodeAttributes.removeAttributes();
-    }
-  }
-  
-  void changeAttributesPkNoPersistance(final INodeDirectory dir, final Long id, final boolean inTree)
-    throws StorageException, TransactionContextException {
-    getINodeAttributes(dir).setInodeIdNoPersistance(id, inTree);
-  }
+
 }

@@ -22,7 +22,7 @@ import java.io.*;
 import java.util.*;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hdfs.StorageType;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.BlockLocalPathInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
@@ -34,7 +34,6 @@ import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.LengthInputStream;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.ReplicaInputStreams;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.ReplicaOutputStreams;
-import org.apache.hadoop.hdfs.server.datanode.fsdataset.RollingLogs;
 import org.apache.hadoop.hdfs.server.protocol.BlockRecoveryCommand.RecoveringBlock;
 import org.apache.hadoop.hdfs.server.protocol.BlockReport;
 import org.apache.hadoop.hdfs.server.protocol.Bucket;
@@ -42,6 +41,7 @@ import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.ReplicaRecoveryInfo;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
+import org.apache.hadoop.hdfs.server.protocol.VolumeFailureSummary;
 import org.apache.hadoop.util.DiskChecker;
 import org.apache.hadoop.util.DiskChecker.DiskErrorException;
 
@@ -50,12 +50,6 @@ public class ExternalDatasetImpl implements FsDatasetSpi<ExternalVolumeImpl> {
   private final DatanodeStorage storage = new DatanodeStorage(
       DatanodeStorage.generateUuid(), DatanodeStorage.State.NORMAL,
       StorageType.DEFAULT);
-
-  @Override
-  public RollingLogs createRollingLogs(String bpid, String prefix)
-      throws IOException {
-    return new ExternalRollingLogs();
-  }
 
   @Override
   public List<ExternalVolumeImpl> getVolumes() {
@@ -276,7 +270,7 @@ public class ExternalDatasetImpl implements FsDatasetSpi<ExternalVolumeImpl> {
 
   @Override
   public String updateReplicaUnderRecovery(ExtendedBlock oldBlock,
-      long recoveryId, long newLength) throws IOException {
+      long recoveryId, long newBlockId, long newLength) throws IOException {
     return null;
   }
 
@@ -369,6 +363,26 @@ public class ExternalDatasetImpl implements FsDatasetSpi<ExternalVolumeImpl> {
   }
 
   @Override
+  public String[] getFailedStorageLocations() {
+    return null;
+  }
+
+  @Override
+  public long getLastVolumeFailureDate() {
+    return 0;
+  }
+
+  @Override
+  public long getEstimatedCapacityLostTotal() {
+    return 0;
+  }
+
+  @Override
+  public VolumeFailureSummary getVolumeFailureSummary() {
+    return null;
+  }
+
+  @Override
   public long getCacheUsed() {
     return 0;
   }
@@ -391,5 +405,14 @@ public class ExternalDatasetImpl implements FsDatasetSpi<ExternalVolumeImpl> {
   @Override
   public long getNumBlocksFailedToUncache() {
     return 0;
+  }
+
+  @Override
+  public void setPinning(ExtendedBlock block) throws IOException {    
+  }
+
+  @Override
+  public boolean getPinning(ExtendedBlock block) throws IOException {
+    return false;
   }
 }

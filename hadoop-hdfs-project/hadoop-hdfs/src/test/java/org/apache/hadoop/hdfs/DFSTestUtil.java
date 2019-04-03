@@ -28,7 +28,6 @@ import io.hops.exception.StorageException;
 import io.hops.metadata.HdfsStorageFactory;
 import io.hops.metadata.hdfs.dal.QuotaUpdateDataAccess;
 import io.hops.metadata.StorageMap;
-import io.hops.metadata.hdfs.dal.INodeAttributesDataAccess;
 import io.hops.metadata.hdfs.dal.INodeDataAccess;
 import io.hops.metadata.hdfs.entity.INodeIdentifier;
 import io.hops.security.UsersGroups;
@@ -45,12 +44,13 @@ import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.fs.ContentSummary;
 import org.apache.hadoop.fs.CreateFlag;
-import org.apache.hadoop.fs.FSDataInputStream;
-import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileSystem.Statistics;
+import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.Options.Rename;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.apache.hadoop.hdfs.client.HdfsDataInputStream;
@@ -75,7 +75,6 @@ import org.apache.hadoop.hdfs.server.datanode.DataNodeLayoutVersion;
 import org.apache.hadoop.hdfs.server.datanode.TestTransferRbw;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.INode;
-import org.apache.hadoop.hdfs.server.namenode.INodeAttributes;
 import org.apache.hadoop.hdfs.server.namenode.INodeDirectory;
 import org.apache.hadoop.hdfs.server.namenode.LeaseManager;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
@@ -128,6 +127,8 @@ import org.junit.Assert;
 import org.junit.Assume;
 
 import static org.junit.Assert.assertEquals;
+import io.hops.metadata.hdfs.dal.DirectoryWithQuotaFeatureDataAccess;
+import org.apache.hadoop.hdfs.server.namenode.DirectoryWithQuotaFeature;
 
 /**
  * Utilities for HDFS tests
@@ -330,27 +331,43 @@ public class DFSTestUtil {
   public static void createFile(FileSystem fs, Path fileName, int bufferLen,
       long fileLen, long blockSize, short replFactor, long seed)
       throws IOException {
-    createFile(fs, fileName, bufferLen, fileLen, blockSize,
-        replFactor, seed, false);
+    createFile(fs, fileName, bufferLen, fileLen, blockSize, replFactor,
+        seed, false);
   }
 
   public static void createFile(FileSystem fs, Path fileName,
       int bufferLen, long fileLen, long blockSize,
       short replFactor, long seed, boolean flush) throws IOException {
-    assert bufferLen > 0;
-    if (!fs.mkdirs(fileName.getParent())) {
+        createFile(fs, fileName, bufferLen, fileLen, blockSize,
+          replFactor, seed, flush, null);
+  }
+
+  public static void createFile(FileSystem fs, Path fileName,
+      int bufferLen, long fileLen, long blockSize,
+      short replFactor, long seed, boolean flush,
+      InetSocketAddress[] favoredNodes) throws IOException {
+  assert bufferLen > 0;
+  if (!fs.mkdirs(fileName.getParent())) {
       throw new IOException("Mkdirs failed to create " +
-          fileName.getParent().toString());
+                fileName.getParent().toString());
+  }
+  FSDataOutputStream out = null;
+  EnumSet<CreateFlag> createFlags = EnumSet.of(CREATE);
+  createFlags.add(OVERWRITE);
+  try {
+    if (favoredNodes == null) {
+      out = fs.create(
+        fileName,
+        FsPermission.getFileDefault(),
+        createFlags,
+        fs.getConf().getInt(
+          CommonConfigurationKeys.IO_FILE_BUFFER_SIZE_KEY, 4096),
+        replFactor, blockSize, null);
+    } else {
+      out = ((DistributedFileSystem) fs).create(fileName,
+        FsPermission.getDefault(), true, bufferLen, replFactor, blockSize,
+        null, favoredNodes, null);
     }
-    FSDataOutputStream out = null;
-    EnumSet<CreateFlag> createFlags = EnumSet.of(CREATE);
-    createFlags.add(OVERWRITE);
-
-    try {
-      out = fs.create(fileName, FsPermission.getFileDefault(), createFlags,
-          fs.getConf().getInt(CommonConfigurationKeys.IO_FILE_BUFFER_SIZE_KEY, 4096),
-          replFactor, blockSize, null);
-
       if (fileLen > 0) {
         byte[] toWrite = new byte[bufferLen];
         Random rb = new Random(seed);
@@ -946,14 +963,18 @@ public class DFSTestUtil {
   /**
    * Get a FileSystem instance as specified user in a doAs block.
    */
-  static public FileSystem getFileSystemAs(UserGroupInformation ugi,
-      final Configuration conf) throws IOException, InterruptedException {
-    return ugi.doAs(new PrivilegedExceptionAction<FileSystem>() {
-      @Override
-      public FileSystem run() throws Exception {
-        return FileSystem.get(conf);
-      }
-    });
+  static public FileSystem getFileSystemAs(UserGroupInformation ugi, 
+      final Configuration conf) throws IOException {
+    try {
+      return ugi.doAs(new PrivilegedExceptionAction<FileSystem>() {
+        @Override
+        public FileSystem run() throws Exception {
+          return FileSystem.get(conf);
+        }
+      });
+    } catch (InterruptedException e) {
+      throw (InterruptedIOException)new InterruptedIOException().initCause(e);
+    }
   }
 
   public static byte[] generateSequentialBytes(int start, int length) {
@@ -1007,7 +1028,7 @@ public class DFSTestUtil {
   }
 
   private static DatanodeID getDatanodeID(String ipAddr) {
-    return new DatanodeID(ipAddr, "localhost", "",
+    return new DatanodeID(ipAddr, "localhost", UUID.randomUUID().toString(),
         DFSConfigKeys.DFS_DATANODE_DEFAULT_PORT,
         DFSConfigKeys.DFS_DATANODE_HTTP_DEFAULT_PORT,
         DFSConfigKeys.DFS_DATANODE_HTTPS_DEFAULT_PORT,
@@ -1019,7 +1040,7 @@ public class DFSTestUtil {
   }
 
   public static DatanodeID getLocalDatanodeID(int port) {
-    return new DatanodeID("127.0.0.1", "localhost", "", port, port, port, port);
+    return new DatanodeID("127.0.0.1", "localhost", UUID.randomUUID().toString(), port, port, port, port);
   }
 
   public static DatanodeDescriptor getLocalDatanodeDescriptor() throws IOException {
@@ -1048,7 +1069,7 @@ public class DFSTestUtil {
   }
 
   public static DatanodeInfo getDatanodeInfo(String ipAddr, String host, int port) {
-    return new DatanodeInfo(new DatanodeID(ipAddr, host, "", port,
+    return new DatanodeInfo(new DatanodeID(ipAddr, host, UUID.randomUUID().toString(), port,
         DFSConfigKeys.DFS_DATANODE_HTTP_DEFAULT_PORT,
         DFSConfigKeys.DFS_DATANODE_HTTPS_DEFAULT_PORT,
         DFSConfigKeys.DFS_DATANODE_IPC_DEFAULT_PORT));
@@ -1184,13 +1205,15 @@ public class DFSTestUtil {
             newINodes.add(newRootINode);
             da.prepare(INode.EMPTY_LIST, newINodes, INode.EMPTY_LIST);
 
-            INodeAttributes inodeAttributes =
-                new INodeAttributes(newRootINode.getId(), newRootINode.isInTree(), Long.MAX_VALUE, 1L, -1L, 0L);
-            INodeAttributesDataAccess ida =
-                (INodeAttributesDataAccess) HdfsStorageFactory
-                    .getDataAccess(INodeAttributesDataAccess.class);
-            List<INodeAttributes> attrList = new ArrayList<INodeAttributes>();
-            attrList.add(inodeAttributes);
+            DirectoryWithQuotaFeature directoryWithQuotaFeature =
+                new DirectoryWithQuotaFeature.Builder(newRootINode.
+                getId()).nameSpaceQuota(Long.MAX_VALUE).nameSpaceUsage(1L).storageSpaceQuota(-1L).spaceUsage(0L).build();
+            newRootINode.addDirectoryWithQuotaFeature(directoryWithQuotaFeature);
+            DirectoryWithQuotaFeatureDataAccess ida =
+                (DirectoryWithQuotaFeatureDataAccess) HdfsStorageFactory
+                    .getDataAccess(DirectoryWithQuotaFeatureDataAccess.class);
+            List<DirectoryWithQuotaFeature> attrList = new ArrayList<DirectoryWithQuotaFeature>();
+            attrList.add(directoryWithQuotaFeature);
             ida.prepare(attrList, null);
 
             return newRootINode;
@@ -1345,6 +1368,9 @@ public class DFSTestUtil {
     FSDataOutputStream s = filesystem.create(pathFileCreate);
     // OP_CLOSE 9
     s.close();
+    // OP_APPEND 47
+    FSDataOutputStream s2 = filesystem.append(pathFileCreate, 4096, null);
+    s2.close();
     // OP_SET_STORAGE_POLICY 45
     filesystem.setStoragePolicy(pathFileCreate,
         HdfsConstants.HOT_STORAGE_POLICY_NAME);
@@ -1376,6 +1402,8 @@ public class DFSTestUtil {
     // OP_SET_QUOTA 14
     filesystem.setQuota(pathDirectoryMkdir, 1000L,
         HdfsConstants.QUOTA_DONT_SET);
+    // OP_SET_QUOTA_BY_STORAGETYPE
+    filesystem.setQuotaByStorageType(pathDirectoryMkdir, StorageType.SSD, 888L);
     // OP_RENAME 15
     fc.rename(pathFileCreate, pathFileMoved, Rename.NONE);
     // OP_CONCAT_DELETE 16
@@ -1628,5 +1656,21 @@ public class DFSTestUtil {
     GenericTestUtils.setLogLevel(NameNode.LOG, level);
     GenericTestUtils.setLogLevel(NameNode.stateChangeLog, level);
     GenericTestUtils.setLogLevel(NameNode.blockStateChangeLog, level);
+  }
+
+ /**
+   * Change the length of a block at datanode dnIndex
+   */
+  public static boolean changeReplicaLength(MiniDFSCluster cluster,
+      ExtendedBlock blk, int dnIndex, int lenDelta) throws IOException {
+    File blockFile = cluster.getBlockFile(dnIndex, blk);
+    if (blockFile != null && blockFile.exists()) {
+      RandomAccessFile raFile = new RandomAccessFile(blockFile, "rw");
+      raFile.setLength(raFile.length()+lenDelta);
+      raFile.close();
+      return true;
+    }
+    LOG.info("failed to change length of block " + blk);
+    return false;
   }
 }

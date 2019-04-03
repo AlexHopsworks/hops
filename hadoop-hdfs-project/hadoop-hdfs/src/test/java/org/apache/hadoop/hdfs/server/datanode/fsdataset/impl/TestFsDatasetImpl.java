@@ -20,19 +20,19 @@ package org.apache.hadoop.hdfs.server.datanode.fsdataset.impl;
 import com.google.common.collect.Lists;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystemTestHelper;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
-import org.apache.hadoop.hdfs.StorageType;
-import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.common.Storage;
 import org.apache.hadoop.hdfs.server.common.StorageInfo;
+import org.apache.hadoop.hdfs.server.datanode.BlockScanner;
 import org.apache.hadoop.hdfs.server.datanode.DNConf;
-import org.apache.hadoop.hdfs.server.datanode.DataBlockScanner;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.DataStorage;
 import org.apache.hadoop.hdfs.server.datanode.ReplicaHandler;
 import org.apache.hadoop.hdfs.server.datanode.StorageLocation;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeReference;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.RoundRobinVolumeChoosingPolicy;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.test.GenericTestUtils;
@@ -47,23 +47,22 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DATANODE_SCAN_PERIOD_HOURS_KEY;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyListOf;
-import static org.mockito.Matchers.anyString;
 import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -81,7 +80,6 @@ public class TestFsDatasetImpl {
   private Configuration conf;
   private DataNode datanode;
   private DataStorage storage;
-  private DataBlockScanner scanner;
   private FsDatasetImpl dataset;
 
   private static Storage.StorageDirectory createStorageDirectory(File root) {
@@ -105,6 +103,7 @@ public class TestFsDatasetImpl {
 
     String dataDir = StringUtils.join(",", dirStrings);
     conf.set(DFSConfigKeys.DFS_DATANODE_DATA_DIR_KEY, dataDir);
+    when(storage.dirIterator()).thenReturn(dirs.iterator());
     when(storage.getNumStorageDirs()).thenReturn(numDirs);
   }
 
@@ -112,13 +111,14 @@ public class TestFsDatasetImpl {
   public void setUp() throws IOException {
     datanode = mock(DataNode.class);
     storage = mock(DataStorage.class);
-    scanner = mock(DataBlockScanner.class);
     this.conf = new Configuration();
+    this.conf.setLong(DFS_DATANODE_SCAN_PERIOD_HOURS_KEY, 0);
     final DNConf dnConf = new DNConf(conf);
 
     when(datanode.getConf()).thenReturn(conf);
     when(datanode.getDnConf()).thenReturn(dnConf);
-    when(datanode.getBlockScanner()).thenReturn(scanner);
+    final BlockScanner disabledBlockScanner = new BlockScanner(datanode, conf);
+    when(datanode.getBlockScanner()).thenReturn(disabledBlockScanner);
 
     createStorageDirs(storage, conf, NUM_INIT_VOLUMES);
     dataset = new FsDatasetImpl(datanode, storage, conf);
@@ -208,10 +208,6 @@ public class TestFsDatasetImpl {
     assertEquals("The replica infos on this volume has been removed from the "
                  + "volumeMap.", NUM_BLOCKS / NUM_INIT_VOLUMES,
                  totalNumReplicas);
-
-    // Verify that every BlockPool deletes the removed blocks from the volume.
-    verify(scanner, times(BLOCK_POOL_IDS.length))
-        .deleteBlocks(anyString(), any(Block[].class));
   }
 
   @Test(timeout = 5000)
@@ -245,7 +241,9 @@ public class TestFsDatasetImpl {
   public void testChangeVolumeWithRunningCheckDirs() throws IOException {
     RoundRobinVolumeChoosingPolicy<FsVolumeImpl> blockChooser =
         new RoundRobinVolumeChoosingPolicy<>();
-    final FsVolumeList volumeList = new FsVolumeList(0, blockChooser);
+    final BlockScanner blockScanner = new BlockScanner(datanode, conf);
+    final FsVolumeList volumeList = new FsVolumeList(
+        Collections.<VolumeFailureInfo>emptyList(), blockScanner, blockChooser);
     final List<FsVolumeImpl> oldVolumes = new ArrayList<>();
 
     // Initialize FsVolumeList with 5 mock volumes.
@@ -254,19 +252,23 @@ public class TestFsDatasetImpl {
       FsVolumeImpl volume = mock(FsVolumeImpl.class);
       oldVolumes.add(volume);
       when(volume.getBasePath()).thenReturn("data" + i);
-      volumeList.addVolume(volume);
+      FsVolumeReference ref = mock(FsVolumeReference.class);
+      when(ref.getVolume()).thenReturn(volume);
+      volumeList.addVolume(ref);
     }
 
     // When call checkDirs() on the 2nd volume, anther "thread" removes the 5th
     // volume and add another volume. It does not affect checkDirs() running.
     final FsVolumeImpl newVolume = mock(FsVolumeImpl.class);
+    final FsVolumeReference newRef = mock(FsVolumeReference.class);
+    when(newRef.getVolume()).thenReturn(newVolume);
     FsVolumeImpl blockedVolume = volumeList.getVolumes().get(1);
     doAnswer(new Answer() {
       @Override
       public Object answer(InvocationOnMock invocationOnMock)
           throws Throwable {
         volumeList.removeVolume(new File("data4"));
-        volumeList.addVolume(newVolume);
+        volumeList.addVolume(newRef);
         return null;
       }
     }).when(blockedVolume).checkDirs();

@@ -37,12 +37,12 @@ import io.hops.transaction.lock.TransactionLocks;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
-import org.apache.hadoop.hdfs.StorageType;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor.BlockTargetPair;
@@ -141,10 +141,6 @@ public class TestBlockManager {
     storages = DFSTestUtil.createDatanodeStorageInfos(racks);
     nodes = Arrays.asList(DFSTestUtil.toDatanodeDescriptor(storages));
 
-    for (DatanodeDescriptor node : nodes) {
-      node.setDatanodeUuidForTesting("DN-Name-" + DatanodeStorage.generateUuid());
-    }
-
     rackA = nodes.subList(0, 3);
     rackB = nodes.subList(3, 6);
     numBuckets = conf.getInt(DFSConfigKeys.DFS_NUM_BUCKETS_KEY, DFSConfigKeys
@@ -167,7 +163,9 @@ public class TestBlockManager {
       dn.getStorageInfos()[0].setUtilizationForTesting(
           2 * HdfsConstants.MIN_BLOCKS_FOR_WRITE*BLOCK_SIZE, 0L,
           2 * HdfsConstants.MIN_BLOCKS_FOR_WRITE*BLOCK_SIZE, 0L);
-      dn.updateHeartbeat(BlockManagerTestUtil.getStorageReportsForDatanode(dn), 0L, 0L, 0, 0);
+      dn.updateHeartbeat(
+          BlockManagerTestUtil.getStorageReportsForDatanode(dn), 0L, 0L, 0, 0,
+          null);
       bm.getDatanodeManager().checkIfClusterIsNowMultiRack(dn);
       bm.getDatanodeManager().addDnToStorageMapInDB(dn);
       bm.getDatanodeManager().addDatanode(dn);
@@ -197,7 +195,7 @@ public class TestBlockManager {
   private void doBasicTest(int testIndex) throws IOException {
     List<DatanodeStorageInfo> origStorages = getStorages(0, 1);
     List<DatanodeDescriptor> origNodes = getNodes(origStorages);
-    BlockInfo blockInfo = addBlockOnNodes((long) testIndex, origNodes);
+    BlockInfoContiguous blockInfo = addBlockOnNodes((long) testIndex, origNodes);
 
     DatanodeStorageInfo[] pipeline = scheduleSingleReplication(blockInfo);
 
@@ -231,7 +229,7 @@ public class TestBlockManager {
     // Block originally on A1, A2, B1
     List<DatanodeStorageInfo> origStorages = getStorages(0, 1, 3);
     List<DatanodeDescriptor> origNodes = getNodes(origStorages);
-    BlockInfo blockInfo = addBlockOnNodes(testIndex, origNodes);
+    BlockInfoContiguous blockInfo = addBlockOnNodes(testIndex, origNodes);
     
     // Decommission two of the nodes (A1, A2)
     List<DatanodeDescriptor> decomNodes = startDecommission(0, 1);
@@ -275,7 +273,7 @@ public class TestBlockManager {
     // Block originally on A1, A2, B1
     List<DatanodeStorageInfo> origStorages = getStorages(0, 1, 3);
     List<DatanodeDescriptor> origNodes = getNodes(origStorages);
-    BlockInfo blockInfo = addBlockOnNodes(testIndex, origNodes);
+    BlockInfoContiguous blockInfo = addBlockOnNodes(testIndex, origNodes);
     
     // Decommission all of the nodes
     List<DatanodeDescriptor> decomNodes = startDecommission(0, 1, 3);
@@ -326,9 +324,8 @@ public class TestBlockManager {
     // Block originally on A1, A2, B1
     List<DatanodeStorageInfo> origStorages = getStorages(0, 1, 3);
     List<DatanodeDescriptor> origNodes = getNodes(origStorages);
-
-    BlockInfo blockInfo = addBlockOnNodes(testIndex, origNodes);
-
+    BlockInfoContiguous blockInfo = addBlockOnNodes(testIndex, origNodes);
+    
     // Decommission all of the nodes in rack A
     List<DatanodeDescriptor> decomNodes = startDecommission(0, 1, 2);
 
@@ -383,7 +380,7 @@ public class TestBlockManager {
       throws IOException {
     // Originally on only nodes in rack A.
     List<DatanodeDescriptor> origNodes = rackA;
-    BlockInfo blockInfo = addBlockOnNodes((long) testIndex, origNodes);
+    BlockInfoContiguous blockInfo = addBlockOnNodes(testIndex, origNodes);
     DatanodeStorageInfo pipeline[] = scheduleSingleReplication(blockInfo);
     
     assertEquals(2, pipeline.length); // single new copy
@@ -404,9 +401,6 @@ public class TestBlockManager {
             BlockManagerTestUtil.getDatanodeDescriptor("4.4.4.4", "/rackA", true),
             BlockManagerTestUtil.getDatanodeDescriptor("5.5.5.5", "/rackA", true),
             BlockManagerTestUtil.getDatanodeDescriptor("6.6.6.6", "/rackA", true));
-    for (int i = 0; i < nodes.size(); i++) {
-      nodes.get(i).setDatanodeUuidForTesting("DN-Name-" + i);
-    }
     addNodes(nodes);
     List<DatanodeDescriptor> origNodes = nodes.subList(0, 3);
 
@@ -428,7 +422,7 @@ public class TestBlockManager {
    * Tell the block manager that replication is completed for the given
    * pipeline.
    */
-  private void fulfillPipeline(final BlockInfo blockInfo,
+  private void fulfillPipeline(final BlockInfoContiguous blockInfo,
       DatanodeStorageInfo[] pipeline) throws IOException {
     HopsTransactionalRequestHandler handler =
         new HopsTransactionalRequestHandler(
@@ -464,10 +458,10 @@ public class TestBlockManager {
     }
   }
 
-  static private BlockInfo blockOnNodes(final long blkId,
+  static private BlockInfoContiguous blockOnNodes(final long blkId,
       final List<DatanodeDescriptor> nodes, final long inode_id)
       throws IOException {
-    return (BlockInfo) new HopsTransactionalRequestHandler(
+    return (BlockInfoContiguous) new HopsTransactionalRequestHandler(
         HDFSOperationType.BLOCK_ON_NODES) {
       @Override
       public void acquireLock(TransactionLocks locks) throws IOException {
@@ -480,7 +474,7 @@ public class TestBlockManager {
       @Override
       public Object performTask() throws IOException {
         Block block = new Block(blkId);
-        BlockInfo blockInfo = new BlockInfo(block, inode_id);
+        BlockInfoContiguous blockInfo = new BlockInfoContiguous(block, inode_id);
 
         for (DatanodeDescriptor dn : nodes) {
           for (DatanodeStorageInfo storage : dn.getStorageInfos()) {
@@ -524,12 +518,12 @@ public class TestBlockManager {
     return nodes;
   }
 
-  private BlockInfo addBlockOnNodes(final long blockId,
+  private BlockInfoContiguous addBlockOnNodes(final long blockId,
       List<DatanodeDescriptor> nodes) throws IOException {
     return addBlockOnNodes(blockId, nodes, 100);
   }
     
-  static private BlockInfo addBlockOnNodes(final long blockId,
+  static private BlockInfoContiguous addBlockOnNodes(final long blockId,
       List<DatanodeDescriptor> nodes, final int inodeId) throws IOException {
 
     LightWeightRequestHandler handle =
@@ -554,7 +548,7 @@ public class TestBlockManager {
 
     final BlockCollection bc = (INodeFile) handle.handle();
 
-    final BlockInfo blockInfo = blockOnNodes(blockId, nodes, inodeId);
+    final BlockInfoContiguous blockInfo = blockOnNodes(blockId, nodes, inodeId);
 
     new HopsTransactionalRequestHandler(HDFSOperationType.BLOCK_ON_NODES) {
       INodeIdentifier inodeIdentifier;
@@ -580,7 +574,7 @@ public class TestBlockManager {
     return blockInfo;
   }
 
-  private DatanodeStorageInfo[] scheduleSingleReplication(final BlockInfo block)
+  private DatanodeStorageInfo[] scheduleSingleReplication(final BlockInfoContiguous block)
       throws IOException {
     final List<Block> list_p1 = new ArrayList<>();
     final List<List<Block>> list_all = new ArrayList<>();
@@ -757,9 +751,6 @@ public class TestBlockManager {
   public void testSafeModeIBR() throws Exception {
     DatanodeDescriptor node = spy(nodes.get(0));
     DatanodeStorageInfo ds = node.getStorageInfos()[0];
-
-    node.setDatanodeUuidForTesting(ds.getStorageID());
-
     node.isAlive = true;
 
     DatanodeRegistration nodeReg =
@@ -804,8 +795,6 @@ public class TestBlockManager {
   public void testSafeModeIBRAfterIncremental() throws Exception {
     DatanodeDescriptor node = spy(nodes.get(0));
     DatanodeStorageInfo ds = node.getStorageInfos()[0];
-
-    node.setDatanodeUuidForTesting(ds.getStorageID());
 
     node.isAlive = true;
 

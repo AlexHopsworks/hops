@@ -23,6 +23,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
@@ -42,7 +43,6 @@ import java.nio.channels.FileChannel;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Random;
-import org.apache.hadoop.hdfs.StorageType;
 import org.apache.hadoop.io.IOUtils;
 
 import static org.junit.Assert.assertEquals;
@@ -249,7 +249,7 @@ public class TestDirectoryScanner {
     assertEquals(mismatchBlocks, stats.mismatchBlocks);
   }
 
-  @Test
+  @Test (timeout=600000)
   public void testDirectoryScanner() throws Exception {
     // Run the test with and without parallel scanning
     for (int parallelism = 1; parallelism < 3; parallelism++) {
@@ -264,8 +264,9 @@ public class TestDirectoryScanner {
       bpid = cluster.getNamesystem().getBlockPoolId();
       fds = DataNodeTestUtils.getFSDataset(cluster.getDataNodes().get(0));
       CONF.setInt(DFSConfigKeys.DFS_DATANODE_DIRECTORYSCAN_THREADS_KEY,
-          parallelism);
-      scanner = new DirectoryScanner(fds, CONF);
+                  parallelism);
+      DataNode dataNode = cluster.getDataNodes().get(0);
+      scanner = new DirectoryScanner(dataNode, fds, CONF);
       scanner.setRetainDiffs(true);
 
       // Add files with 100 blocks
@@ -455,6 +456,22 @@ public class TestDirectoryScanner {
 
     @Override
     public void releaseReservedSpace(long bytesToRelease) {
+    }
+
+    @Override
+    public BlockIterator newBlockIterator(String bpid, String name) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public BlockIterator loadBlockIterator(String bpid, String name)
+          throws IOException {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public FsDatasetSpi getDataset() {
+      throw new UnsupportedOperationException();
     }
   }
 

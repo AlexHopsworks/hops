@@ -64,6 +64,7 @@ public class DirectoryScanner implements Runnable {
   private final long scanPeriodMsecs;
   private volatile boolean shouldRun = false;
   private boolean retainDiffs = false;
+  private final DataNode datanode;
 
   ScanInfoPerBlockPool diffs = new ScanInfoPerBlockPool();
   Map<String, Stats> stats = new HashMap<>();
@@ -321,7 +322,8 @@ public class DirectoryScanner implements Runnable {
     }
   }
 
-  DirectoryScanner(FsDatasetSpi<?> dataset, Configuration conf) {
+  DirectoryScanner(DataNode datanode, FsDatasetSpi<?> dataset, Configuration conf) {
+    this.datanode = datanode;
     this.dataset = dataset;
     int interval =
         conf.getInt(DFSConfigKeys.DFS_DATANODE_DIRECTORYSCAN_INTERVAL_KEY,
@@ -567,9 +569,10 @@ public class DirectoryScanner implements Runnable {
 
     for (int i = 0; i < volumes.size(); i++) {
       if (isValid(dataset, volumes.get(i))) {
-        ReportCompiler reportCompiler = new ReportCompiler(volumes.get(i));
-        Future<ScanInfoPerBlockPool> result =
-            reportCompileThreadPool.submit(reportCompiler);
+        ReportCompiler reportCompiler =
+          new ReportCompiler(datanode,volumes.get(i));
+        Future<ScanInfoPerBlockPool> result = 
+          reportCompileThreadPool.submit(reportCompiler);
         compilersInProgress.put(i, result);
       }
     }
@@ -602,11 +605,13 @@ public class DirectoryScanner implements Runnable {
         metaFile.endsWith(Block.METADATA_EXTENSION);
   }
 
-  private static class ReportCompiler
-      implements Callable<ScanInfoPerBlockPool> {
-    private FsVolumeSpi volume;
+  private static class ReportCompiler 
+  implements Callable<ScanInfoPerBlockPool> {
+    private final FsVolumeSpi volume;
+    private final DataNode datanode;
 
-    public ReportCompiler(FsVolumeSpi volume) {
+    public ReportCompiler(DataNode datanode, FsVolumeSpi volume) {
+      this.datanode = datanode;
       this.volume = volume;
     }
 
@@ -617,22 +622,22 @@ public class DirectoryScanner implements Runnable {
       for (String bpid : bpList) {
         LinkedList<ScanInfo> report = new LinkedList<>();
         File bpFinalizedDir = volume.getFinalizedDir(bpid);
-        result.put(bpid, compileReport(volume, bpFinalizedDir, report));
+        result.put(bpid,
+            compileReport(volume, bpFinalizedDir, bpFinalizedDir, report));
       }
       return result;
     }
 
-    /**
-     * Compile list {@link ScanInfo} for the blocks in the directory <dir>
-     */
-    private LinkedList<ScanInfo> compileReport(FsVolumeSpi vol, File dir,
-        LinkedList<ScanInfo> report) {
-      LOG.info("Scanning local blocks");
+    /** Compile list {@link ScanInfo} for the blocks in the directory <dir> */
+    private LinkedList<ScanInfo> compileReport(FsVolumeSpi vol,
+        File bpFinalizedDir, File dir, LinkedList<ScanInfo> report) {
       File[] files;
       try {
         files = FileUtil.listFiles(dir);
       } catch (IOException ioe) {
         LOG.warn("Exception occured while compiling report: ", ioe);
+        // Initiate a check on disk failure.
+        datanode.checkDiskErrorAsync();
         // Ignore this directory and proceed.
         return report;
       }
@@ -655,24 +660,41 @@ public class DirectoryScanner implements Runnable {
       }
 
       for (File subDir : subDirs) {
-        compileReport(vol, subDir, report);
+        compileReport(vol, bpFinalizedDir, subDir, report);
       }
 
       for (int i = blkFiles.size() - 1; i >= 0; i--) {
-        File blkFile = blkFiles.get(i);
-        long blockId = Block.filename2id(blkFile.getName());
-        File metaFile = popMetaFile(blkFile, metaFiles);
-        report.add(new ScanInfo(blockId, blkFile, metaFile, vol));
+        File blockFile = blkFiles.get(i);
+        long blockId = Block.filename2id(blockFile.getName());
+        File metaFile = popMetaFile(blockFile, metaFiles);
+        verifyFileLocation(blockFile.getParentFile(), bpFinalizedDir,
+            blockId);
+        report.add(new ScanInfo(blockId, blockFile, metaFile, vol));
         blkFiles.remove(i);
       }
 
       for (int i = metaFiles.size() - 1; i >= 0; i--) {
         File metaFile = metaFiles.get(i);
         long blockId = Block.getBlockId(metaFile.getName());
+        verifyFileLocation(files[i].getParentFile(), bpFinalizedDir,
+            blockId);
         report.add(new ScanInfo(blockId, null, metaFile, vol));
       }
 
       return report;
+    }
+
+    /**
+     * Verify whether the actual directory location of block file has the
+     * expected directory path computed using its block ID.
+     */
+    private void verifyFileLocation(File actualBlockDir,
+        File bpFinalizedDir, long blockId) {
+      File blockDir = DatanodeUtil.idToBlockDir(bpFinalizedDir, blockId);
+      if (actualBlockDir.compareTo(blockDir) != 0) {
+        LOG.warn("Block: " + blockId
+            + " has to be upgraded to block ID-based layout");
+      }
     }
   }
   

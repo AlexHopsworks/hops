@@ -32,6 +32,7 @@ import org.apache.hadoop.fs.Options;
 import org.apache.hadoop.fs.BatchedRemoteIterator.BatchedEntries;
 import org.apache.hadoop.fs.Options.Rename;
 import org.apache.hadoop.fs.ParentNotDirectoryException;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.fs.UnresolvedLinkException;
 import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.AclEntry;
@@ -350,12 +351,10 @@ public interface ClientProtocol {
       IOException;
 
   /**
-   * Append to the end of the file.
-   *
-   * @param src
-   *     path of the file being created.
-   * @param clientName
-   *     name of the current client.
+   * Append to the end of the file. 
+   * @param src path of the file being created.
+   * @param clientName name of the current client.
+   * @param flag indicates whether the data is appended to a new block.
    * @return wrapper with information about the last partial block and file
    *    status if any
    * @throws AccessControlException
@@ -385,10 +384,10 @@ public interface ClientProtocol {
    *     if append is not supported
    */
   @AtMostOnce
-  public LastBlockWithStatus append(String src, String clientName)
-      throws AccessControlException, DSQuotaExceededException,
-      FileNotFoundException, SafeModeException, UnresolvedLinkException,
-      IOException;
+  public LastBlockWithStatus append(String src, String clientName,
+      EnumSetWritable<CreateFlag> flag) throws AccessControlException,
+      DSQuotaExceededException, FileNotFoundException, SafeModeException,
+      UnresolvedLinkException, IOException;
 
   /**
    * Set replication for an existing file.
@@ -765,7 +764,7 @@ public interface ClientProtocol {
    * @param src  existing file
    * @param newLength  the target size
    *
-   * @return true if and client does not need to wait for block recovery,
+   * @return true if client does not need to wait for block recovery,
    * false if client needs to wait for block recovery.
    *
    * @throws AccessControlException If access is denied
@@ -1159,41 +1158,35 @@ public interface ClientProtocol {
 
   /**
    * Set the quota for a directory.
-   * NOTE: In contrast to Apache Hadoop, HOPS does not strictly enforce this
-   * quota as its calculation is eventually consistent. Hence, small quota
-   * violations are possible within a short period of time before after an
-   * operation affecting the quota that causes the reach of a limit.
+   * @param path  The string representation of the path to the directory
+   * @param namespaceQuota Limit on the number of names in the tree rooted 
+   *                       at the directory
+   * @param storagespaceQuota Limit on storage space occupied all the files under
+   *                       this directory.
+   * @param type StorageType that the space quota is intended to be set on.
+   *             It may be null when called by traditional space/namespace quota.
+   *             When type is is not null, the storagespaceQuota parameter is for
+   *             type specified and namespaceQuota must be
+   *             {@link HdfsConstants#QUOTA_DONT_SET}.
    *
-   * @param path
-   *     The string representation of the path to the directory
-   * @param namespaceQuota
-   *     Limit on the number of names in the tree rooted
-   *     at the directory
-   * @param diskspaceQuota
-   *     Limit on disk space occupied all the files under
-   *     this directory.
-   *     <br><br>
-   *     <p/>
-   *     The quota can have three types of values : (1) 0 or more will set
-   *     the quota to that value, (2) {@link HdfsConstants#QUOTA_DONT_SET}
-   *     implies
-   *     the quota will not be changed, and (3) {@link HdfsConstants#QUOTA_RESET}
-   *     implies the quota will be reset. Any other value is a runtime error.
-   * @throws AccessControlException
-   *     permission denied
-   * @throws FileNotFoundException
-   *     file <code>path</code> is not found
-   * @throws QuotaExceededException
-   *     if the directory size
-   *     is greater than the given quota
-   * @throws UnresolvedLinkException
-   *     if the <code>path</code> contains a symlink.
-   * @throws IOException
-   *     If an I/O error occurred
+   * <br><br>
+   *                       
+   * The quota can have three types of values : (1) 0 or more will set 
+   * the quota to that value, (2) {@link HdfsConstants#QUOTA_DONT_SET}  implies 
+   * the quota will not be changed, and (3) {@link HdfsConstants#QUOTA_RESET} 
+   * implies the quota will be reset. Any other value is a runtime error.
+   * 
+   * @throws AccessControlException permission denied
+   * @throws FileNotFoundException file <code>path</code> is not found
+   * @throws QuotaExceededException if the directory size 
+   *           is greater than the given quota
+   * @throws UnresolvedLinkException if the <code>path</code> contains a symlink. 
+   * @throws SnapshotAccessControlException if path is in RO snapshot
+   * @throws IOException If an I/O error occurred
    */
   @Idempotent
-  public void setQuota(String path, long namespaceQuota, long diskspaceQuota)
-      throws AccessControlException, FileNotFoundException,
+  public void setQuota(String path, long namespaceQuota, long storagespaceQuota,
+      StorageType type) throws AccessControlException, FileNotFoundException,
       UnresolvedLinkException, IOException;
 
   /**

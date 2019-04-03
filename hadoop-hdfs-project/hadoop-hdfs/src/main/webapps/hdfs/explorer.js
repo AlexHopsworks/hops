@@ -125,6 +125,13 @@
       menus.change();
     }
 
+    function encode_path(abs_path) {
+      abs_path = encodeURIComponent(abs_path);
+      var re = /%2F/g;
+      return abs_path.replace(re, '/');
+    }
+
+    abs_path = encode_path(abs_path);
     var url = '/webhdfs/v1' + abs_path + '?op=GET_BLOCK_LOCATIONS';
     $.get(url).done(function(data) {
       var d = get_response(data, "LocatedBlocks");
@@ -159,6 +166,12 @@
   }
 
   function browse_directory(dir) {
+    var HELPERS = {
+      'helper_date_tostring' : function (chunk, ctx, bodies, params) {
+        var value = dust.helpers.tap(params.value, chunk, ctx);
+        return chunk.write('' + new Date(Number(value)).toLocaleString());
+      }
+    };
     var url = get_location() + '/webhdfs/v1' + dir + '?op=LISTSTATUS';
     $.get(url, function(data) {
       var d = get_response(data, "FileStatuses");
@@ -169,6 +182,7 @@
 
       current_directory = dir;
       $('#directory').val(dir);
+      var base = dust.makeBase(HELPERS);
       dust.render('explorer', base.push(d), function(err, out) {
         $('#panel').html(out);
 

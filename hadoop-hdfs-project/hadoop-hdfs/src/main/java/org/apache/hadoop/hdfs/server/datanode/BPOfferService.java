@@ -28,9 +28,9 @@ import io.hops.leader_election.node.ActiveNodePBImpl;
 import io.hops.leader_election.node.SortedActiveNodeList;
 import org.apache.commons.logging.Log;
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.ExceptionCheck;
-import org.apache.hadoop.hdfs.StorageType;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
@@ -722,9 +722,6 @@ class BPOfferService implements Runnable {
         //
         Block toDelete[] = bcmd.getBlocks();
         try {
-          if (dn.blockScanner != null) {
-            dn.blockScanner.deleteBlocks(bcmd.getBlockPoolId(), toDelete);
-          }
           // using global fsdataset
           dn.getFSDataset().invalidate(bcmd.getBlockPoolId(), toDelete);
         } catch (IOException e) {
@@ -907,12 +904,6 @@ class BPOfferService implements Runnable {
         blkReportHander.processCommand(new DatanodeCommand[]{cmd});
       }
       
-      // Now safe to start scanning the block pool.
-      // If it has already been started, this is a no-op.
-      if (dn.blockScanner != null) {
-        dn.blockScanner.addBlockPool(getBlockPoolId());
-      }
-
       if (brFailed){
         Thread.sleep(2000); //sleep before retrying to send the block report
       }

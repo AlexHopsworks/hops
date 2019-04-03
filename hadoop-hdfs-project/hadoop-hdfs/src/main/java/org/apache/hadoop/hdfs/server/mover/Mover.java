@@ -28,7 +28,11 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hdfs.*;
+import org.apache.hadoop.fs.StorageType;
+import org.apache.hadoop.hdfs.HdfsConfiguration;
+import org.apache.hadoop.hdfs.DFSClient;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.protocol.*;
 import org.apache.hadoop.hdfs.server.balancer.Dispatcher;
 import org.apache.hadoop.hdfs.server.balancer.Dispatcher.*;
@@ -37,7 +41,6 @@ import org.apache.hadoop.hdfs.server.balancer.ExitStatus;
 import org.apache.hadoop.hdfs.server.balancer.Matcher;
 import org.apache.hadoop.hdfs.server.balancer.NameNodeConnector;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockStoragePolicySuite;
-import org.apache.hadoop.hdfs.server.namenode.INode;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorageReport;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
 import org.apache.hadoop.io.IOUtils;
@@ -49,7 +52,6 @@ import org.apache.hadoop.util.ToolRunner;
 
 import java.io.BufferedReader;
 import java.io.FileInputStream;
-import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.URI;
@@ -464,7 +466,8 @@ public class Mover {
     List<NameNodeConnector> connectors = Collections.emptyList();
     try {
       connectors = NameNodeConnector.newNameNodeConnectors(namenodes,
-          Mover.class.getSimpleName(), MOVER_ID_PATH, conf);
+          Mover.class.getSimpleName(), MOVER_ID_PATH, conf,
+          NameNodeConnector.DEFAULT_MAX_IDLE_ITERATIONS);
 
       while (connectors.size() > 0) {
         Collections.shuffle(connectors);
@@ -493,8 +496,8 @@ public class Mover {
   }
 
   static class Cli extends Configured implements Tool {
-    private static final String USAGE = "Usage: java "
-        + Mover.class.getSimpleName() + " [-p <files/dirs> | -f <local file>]"
+    private static final String USAGE = "Usage: hdfs mover "
+        + "[-p <files/dirs> | -f <local file>]"
         + "\n\t-p <files/dirs>\ta space separated list of HDFS files/dirs to migrate."
         + "\n\t-f <local file>\ta local file containing a list of HDFS files/dirs to migrate.";
 

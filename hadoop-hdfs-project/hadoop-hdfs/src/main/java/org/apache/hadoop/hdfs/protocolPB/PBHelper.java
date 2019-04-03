@@ -36,14 +36,12 @@ import org.apache.hadoop.fs.ContentSummary;
 import org.apache.hadoop.fs.CreateFlag;
 import org.apache.hadoop.fs.FsServerDefaults;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.fs.permission.FsAction;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.AclEntryScope;
 import org.apache.hadoop.fs.permission.AclEntryType;
 import org.apache.hadoop.fs.permission.AclStatus;
-import org.apache.hadoop.hdfs.shortcircuit.ShortCircuitShm.ShmId;
-import org.apache.hadoop.hdfs.shortcircuit.ShortCircuitShm.SlotId;
-import org.apache.hadoop.hdfs.StorageType;
+import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.CacheDirectiveEntry;
@@ -110,6 +108,7 @@ import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.FinalizeComm
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.KeyUpdateCommandProto;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.ReceivedDeletedBlockInfoProto;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.RegisterCommandProto;
+import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.VolumeFailureSummaryProto;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.BlockKeyProto;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.BlockProto;
@@ -182,6 +181,9 @@ import org.apache.hadoop.hdfs.server.protocol.ReceivedDeletedBlockInfo;
 import org.apache.hadoop.hdfs.server.protocol.ReceivedDeletedBlockInfo.BlockStatus;
 import org.apache.hadoop.hdfs.server.protocol.RegisterCommand;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
+import org.apache.hadoop.hdfs.server.protocol.VolumeFailureSummary;
+import org.apache.hadoop.hdfs.shortcircuit.ShortCircuitShm.ShmId;
+import org.apache.hadoop.hdfs.shortcircuit.ShortCircuitShm.SlotId;
 import org.apache.hadoop.hdfs.util.ExactSizeInputStream;
 import org.apache.hadoop.io.EnumSetWritable;
 import org.apache.hadoop.io.Text;
@@ -463,17 +465,20 @@ public class PBHelper {
     if (b == null) {
       return null;
     }
-    LocatedBlockProto lb = PBHelper.convert((LocatedBlock) b);
-    return RecoveringBlockProto.newBuilder().setBlock(lb)
-        .setNewGenStamp(b.getNewGenerationStamp())
-        .setTruncateFlag(b.getTruncateFlag()).build();
+    LocatedBlockProto lb = PBHelper.convert((LocatedBlock)b);
+    RecoveringBlockProto.Builder builder = RecoveringBlockProto.newBuilder();
+    builder.setBlock(lb).setNewGenStamp(b.getNewGenerationStamp());
+    if(b.getNewBlock() != null)
+      builder.setTruncateBlock(PBHelper.convert(b.getNewBlock()));
+    return builder.build();
   }
 
   public static RecoveringBlock convert(RecoveringBlockProto b) {
     ExtendedBlock block = convert(b.getBlock().getB());
     DatanodeInfo[] locs = convert(b.getBlock().getLocsList());
-    return new RecoveringBlock(block, locs, b.getNewGenStamp(),
-        b.getTruncateFlag());
+    return (b.hasTruncateBlock()) ?
+        new RecoveringBlock(block, locs, PBHelper.convert(b.getTruncateBlock())) :
+        new RecoveringBlock(block, locs, b.getNewGenStamp());
   }
 
   public static DatanodeInfoProto.AdminState convert(
@@ -1258,6 +1263,9 @@ public class PBHelper {
     if (flag.contains(CreateFlag.OVERWRITE)) {
       value |= CreateFlagProto.OVERWRITE.getNumber();
     }
+    if (flag.contains(CreateFlag.NEW_BLOCK)) {
+      value |= CreateFlagProto.NEW_BLOCK.getNumber();
+    }
     return value;
   }
 
@@ -1273,7 +1281,11 @@ public class PBHelper {
         CreateFlagProto.OVERWRITE_VALUE) {
       result.add(CreateFlag.OVERWRITE);
     }
-    return new EnumSetWritable<>(result);
+    if ((flag & CreateFlagProto.NEW_BLOCK_VALUE)
+        == CreateFlagProto.NEW_BLOCK_VALUE) {
+      result.add(CreateFlag.NEW_BLOCK);
+    }
+    return new EnumSetWritable<CreateFlag>(result, CreateFlag.class);
   }
   
   public static int convertCacheFlags(EnumSet<CacheFlag> flags) {
@@ -1727,6 +1739,29 @@ public class PBHelper {
       protos.add(convert(storages[i]));
     }
     return protos;
+  }
+
+  public static VolumeFailureSummary convertVolumeFailureSummary(
+      VolumeFailureSummaryProto proto) {
+    List<String> failedStorageLocations = proto.getFailedStorageLocationsList();
+    return new VolumeFailureSummary(
+        failedStorageLocations.toArray(new String[failedStorageLocations.size()]),
+        proto.getLastVolumeFailureDate(), proto.getEstimatedCapacityLostTotal());
+  }
+
+  public static VolumeFailureSummaryProto convertVolumeFailureSummary(
+      VolumeFailureSummary volumeFailureSummary) {
+    VolumeFailureSummaryProto.Builder builder =
+        VolumeFailureSummaryProto.newBuilder();
+    for (String failedStorageLocation:
+        volumeFailureSummary.getFailedStorageLocations()) {
+      builder.addFailedStorageLocations(failedStorageLocation);
+    }
+    builder.setLastVolumeFailureDate(
+        volumeFailureSummary.getLastVolumeFailureDate());
+    builder.setEstimatedCapacityLostTotal(
+        volumeFailureSummary.getEstimatedCapacityLostTotal());
+    return builder.build();
   }
 
   public static DataChecksum.Type convert(HdfsProtos.ChecksumTypeProto type) {
@@ -2479,4 +2514,26 @@ public class PBHelper {
     buffer.flip();//need flip 
     return buffer.getLong();
   }
+
+  public static List<Boolean> convert(boolean[] targetPinnings, int idx) {
+    List<Boolean> pinnings = new ArrayList<Boolean>();
+    if (targetPinnings == null) {
+      pinnings.add(Boolean.FALSE);
+    } else {
+      for (; idx < targetPinnings.length; ++idx) {
+        pinnings.add(Boolean.valueOf(targetPinnings[idx]));
+      }
+    }
+    return pinnings;
+  }
+
+  public static boolean[] convertBooleanList(
+    List<Boolean> targetPinningsList) {
+    final boolean[] targetPinnings = new boolean[targetPinningsList.size()];
+    for (int i = 0; i < targetPinningsList.size(); i++) {
+      targetPinnings[i] = targetPinningsList.get(i);
+    }
+    return targetPinnings;
+  }
+
 }

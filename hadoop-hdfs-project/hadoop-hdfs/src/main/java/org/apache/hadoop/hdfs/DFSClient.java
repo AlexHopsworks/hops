@@ -120,6 +120,7 @@ import org.apache.hadoop.fs.Options;
 import org.apache.hadoop.fs.Options.ChecksumOpt;
 import org.apache.hadoop.fs.ParentNotDirectoryException;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.fs.UnresolvedLinkException;
 import org.apache.hadoop.fs.VolumeId;
 import org.apache.hadoop.fs.permission.AclEntry;
@@ -144,8 +145,10 @@ import org.apache.hadoop.hdfs.protocol.LastBlockWithStatus;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.protocol.NSQuotaExceededException;
+import org.apache.hadoop.hdfs.protocol.QuotaByStorageTypeExceededException;
 import org.apache.hadoop.hdfs.protocol.RollingUpgradeInfo;
 import org.apache.hadoop.hdfs.protocol.UnresolvedPathException;
+import org.apache.hadoop.hdfs.protocol.datatransfer.DataTransferProtoUtil;
 import org.apache.hadoop.hdfs.protocol.datatransfer.IOStreamPair;
 import org.apache.hadoop.hdfs.protocol.datatransfer.Op;
 import org.apache.hadoop.hdfs.protocol.datatransfer.ReplaceDatanodeOnFailure;
@@ -1569,8 +1572,7 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
    *
    * @return output stream
    *
-   * @see ClientProtocol#create(String, FsPermission, String, EnumSetWritable,
-   * boolean, short, long) for detailed description of exceptions thrown
+   * @see ClientProtocol#create for detailed description of exceptions thrown
    */
   public DFSOutputStream create(String src,
                              FsPermission permission,
@@ -1613,6 +1615,17 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
     if(LOG.isDebugEnabled()) {
       LOG.debug(src + ": masked=" + masked);
     }
+    final DFSOutputStream result = DFSOutputStream.newStreamForCreate(this,
+        src, masked, flag, createParent, replication, blockSize, progress,
+        buffersize, dfsClientConf.createChecksum(checksumOpt),
+        getFavoredNodesStr(favoredNodes),
+        policy, isStoreSmallFilesInDB(),
+        getDBFileMaxSize());
+    beginFileLease(result.getFileId(), result);
+    return result;
+  }
+
+  private String[] getFavoredNodesStr(InetSocketAddress[] favoredNodes) {
     String[] favoredNodeStrs = null;
     if (favoredNodes != null) {
       favoredNodeStrs = new String[favoredNodes.length];
@@ -1622,14 +1635,7 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
                          + favoredNodes[i].getPort();
       }
     }
-    final DFSOutputStream result = DFSOutputStream.newStreamForCreate(this,
-        src, masked, flag, createParent, replication, blockSize, progress,
-        buffersize, dfsClientConf.createChecksum(checksumOpt), favoredNodeStrs,
-            policy, isStoreSmallFilesInDB(),
-            getDBFileMaxSize());
-
-    beginFileLease(result.getFileId(), result);
-    return result;
+    return favoredNodeStrs;
   }
 
   /**
@@ -1647,7 +1653,7 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
         }
         return null;
       }
-      return callAppend(src, buffersize, progress);
+      return callAppend(src, buffersize, flag, progress, null);
     }
     return null;
   }
@@ -1718,11 +1724,18 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
   }
 
   /** Method to get stream returned by append call */
-  private DFSOutputStream callAppend(String src,
-      int buffersize, Progressable progress) throws IOException {
-    LastBlockWithStatus lastBlockWithStatus = null;
+  private DFSOutputStream callAppend(String src, int buffersize,
+      EnumSet<CreateFlag> flag, Progressable progress, String[] favoredNodes)
+      throws IOException {
+    CreateFlag.validateForAppend(flag);
     try {
-      lastBlockWithStatus = namenode.append(src, clientName);
+      LastBlockWithStatus blkWithStatus = namenode.append(src, clientName,
+          new EnumSetWritable<>(flag, CreateFlag.class));
+      return DFSOutputStream.newStreamForAppend(this, src,
+          flag.contains(CreateFlag.NEW_BLOCK),
+          buffersize, progress, blkWithStatus.getLastBlock(),
+          blkWithStatus.getFileStatus(), dfsClientConf.createChecksum(), favoredNodes,
+          isStoreSmallFilesInDB(), getDBFileMaxSize(), dfsClientConf.hdfsClientEmulationForSF);
     } catch(RemoteException re) {
       throw re.unwrapRemoteException(AccessControlException.class,
                                      FileNotFoundException.class,
@@ -1731,11 +1744,6 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
                                      UnsupportedOperationException.class,
                                      UnresolvedPathException.class);
     }
-    HdfsFileStatus newStat = lastBlockWithStatus.getFileStatus();
-    return DFSOutputStream.newStreamForAppend(this, src, buffersize, progress,
-        lastBlockWithStatus.getLastBlock(), newStat,
-        dfsClientConf.createChecksum(),isStoreSmallFilesInDB(),
-        getDBFileMaxSize(), dfsClientConf.hdfsClientEmulationForSF);
   }
 
   /**
@@ -1743,23 +1751,49 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
    *
    * @param src file name
    * @param buffersize buffer size
+   * @param flag indicates whether to append data to a new block instead of
+   *             the last block
    * @param progress for reporting write-progress; null is acceptable.
    * @param statistics file system statistics; null is acceptable.
    * @return an output stream for writing into the file
-   *
-   * @see ClientProtocol#append(String, String)
+   * 
+   * @see ClientProtocol#append(String, String, EnumSetWritable)
    */
   public HdfsDataOutputStream append(final String src, final int buffersize,
-      final Progressable progress, final FileSystem.Statistics statistics
-      ) throws IOException {
-    final DFSOutputStream out = append(src, buffersize, progress);
-    return new HdfsDataOutputStream(out, statistics, out.getInitialLen());
+      EnumSet<CreateFlag> flag, final Progressable progress,
+      final FileSystem.Statistics statistics) throws IOException {
+    final DFSOutputStream out = append(src, buffersize, flag, null, progress);
+    return createWrappedOutputStream(out, statistics, out.getInitialLen());
   }
 
-  private DFSOutputStream append(String src, int buffersize, Progressable progress)
+  /**
+   * Append to an existing HDFS file.
+   * 
+   * @param src file name
+   * @param buffersize buffer size
+   * @param flag indicates whether to append data to a new block instead of the
+   *          last block
+   * @param progress for reporting write-progress; null is acceptable.
+   * @param statistics file system statistics; null is acceptable.
+   * @param favoredNodes FavoredNodes for new blocks
+   * @return an output stream for writing into the file
+   * @see ClientProtocol#append(String, String, EnumSetWritable)
+   */
+  public HdfsDataOutputStream append(final String src, final int buffersize,
+      EnumSet<CreateFlag> flag, final Progressable progress,
+      final FileSystem.Statistics statistics,
+      final InetSocketAddress[] favoredNodes) throws IOException {
+    final DFSOutputStream out = append(src, buffersize, flag,
+        getFavoredNodesStr(favoredNodes), progress);
+    return createWrappedOutputStream(out, statistics, out.getInitialLen());
+  }
+
+  private DFSOutputStream append(String src, int buffersize,
+      EnumSet<CreateFlag> flag, String[] favoredNodes, Progressable progress)
       throws IOException {
     checkOpen();
-    final DFSOutputStream result = callAppend(src, buffersize, progress);
+    final DFSOutputStream result = callAppend(src, buffersize, flag, progress,
+        favoredNodes);
     beginFileLease(result.getFileId(), result);
     return result;
   }
@@ -1804,7 +1838,7 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
 
   /**
    * Move blocks from src to trg and delete src
-   * See {@link ClientProtocol#concat(String, String [])}.
+   * See {@link ClientProtocol#concat}.
    */
   public void concat(String trg, String [] srcs) throws IOException {
     checkOpen();
@@ -1838,7 +1872,7 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
 
   /**
    * Truncate a file to an indicated size
-   * See {@link ClientProtocol#truncate(String, long)}. 
+   * See {@link ClientProtocol#truncate}.
    */
   public boolean truncate(String src, long newLength) throws IOException {
     checkOpen();
@@ -2075,14 +2109,8 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
           final BlockOpResponseProto reply =
             BlockOpResponseProto.parseFrom(PBHelper.vintPrefixed(in));
 
-          if (reply.getStatus() != Status.SUCCESS) {
-            if (reply.getStatus() == Status.ERROR_ACCESS_TOKEN) {
-              throw new InvalidBlockTokenException();
-            } else {
-              throw new IOException("Bad response " + reply + " for block "
-                  + block + " from datanode " + datanodes[j]);
-            }
-          }
+          String logInfo = "for block " + block + " from datanode " + datanodes[j];
+          DataTransferProtoUtil.checkBlockOpStatus(reply, logInfo);
 
           OpBlockChecksumResponseProto checksumData =
             reply.getChecksumResponse();
@@ -2240,15 +2268,8 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
           0, 1, true, CachingStrategy.newDefaultStrategy());
       final BlockOpResponseProto reply =
           BlockOpResponseProto.parseFrom(PBHelper.vintPrefixed(in));
-
-      if (reply.getStatus() != Status.SUCCESS) {
-        if (reply.getStatus() == Status.ERROR_ACCESS_TOKEN) {
-          throw new InvalidBlockTokenException();
-        } else {
-          throw new IOException("Bad response " + reply + " trying to read "
-              + lb.getBlock() + " from datanode " + dn);
-        }
-      }
+      String logInfo = "trying to read " + lb.getBlock() + " from datanode " + dn;
+      DataTransferProtoUtil.checkBlockOpStatus(reply, logInfo);
 
       return PBHelper.convert(reply.getReadOpChecksumInfo().getChecksum().getType());
     } finally {
@@ -2596,8 +2617,8 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
 
   /**
    * Get {@link ContentSummary} rooted at the specified directory.
-   * @param path The string representation of the path
-   *
+   * @param src The string representation of the path
+   * 
    * @see ClientProtocol#getContentSummary(String)
    */
   ContentSummary getContentSummary(String src) throws IOException {
@@ -2612,22 +2633,23 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
 
   /**
    * Sets or resets quotas for a directory.
-   * @see ClientProtocol#setQuota(String, long, long)
+   * @see ClientProtocol#setQuota(String, long, long, StorageType)
    */
-  void setQuota(String src, long namespaceQuota, long diskspaceQuota)
+  void setQuota(String src, long namespaceQuota, long storagespaceQuota)
       throws IOException {
     // sanity check
     if ((namespaceQuota <= 0 && namespaceQuota != HdfsConstants.QUOTA_DONT_SET &&
          namespaceQuota != HdfsConstants.QUOTA_RESET) ||
-        (diskspaceQuota <= 0 && diskspaceQuota != HdfsConstants.QUOTA_DONT_SET &&
-         diskspaceQuota != HdfsConstants.QUOTA_RESET)) {
+        (storagespaceQuota <= 0 && storagespaceQuota != HdfsConstants.QUOTA_DONT_SET &&
+         storagespaceQuota != HdfsConstants.QUOTA_RESET)) {
       throw new IllegalArgumentException("Invalid values for quota : " +
                                          namespaceQuota + " and " +
-                                         diskspaceQuota);
+                                         storagespaceQuota);
 
     }
     try (TraceScope ignored = newPathTraceScope("setQuota", src)) {
-      leaderNN.setQuota(src, namespaceQuota, diskspaceQuota);
+      // Pass null as storage type for traditional namespace/storagespace quota.
+      leaderNN.setQuota(src, namespaceQuota, storagespaceQuota, null);
     } catch(RemoteException re) {
       throw re.unwrapRemoteException(AccessControlException.class,
                                      FileNotFoundException.class,
@@ -2637,6 +2659,33 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
     }
   }
 
+  /**
+   * Sets or resets quotas by storage type for a directory.
+   * @see ClientProtocol#setQuota(String, long, long, StorageType)
+   */
+  void setQuotaByStorageType(String src, StorageType type, long quota)
+      throws IOException {
+    if (quota <= 0 && quota != HdfsConstants.QUOTA_DONT_SET &&
+        quota != HdfsConstants.QUOTA_RESET) {
+      throw new IllegalArgumentException("Invalid values for quota :" +
+        quota);
+    }
+    if (type == null) {
+      throw new IllegalArgumentException("Invalid storage type(null)");
+    }
+    if (!type.supportTypeQuota()) {
+      throw new IllegalArgumentException("Don't support Quota for storage type : "
+        + type.toString());
+    }
+    try {
+      namenode.setQuota(src, HdfsConstants.QUOTA_DONT_SET, quota, type);
+    } catch (RemoteException re) {
+      throw re.unwrapRemoteException(AccessControlException.class,
+        FileNotFoundException.class,
+        QuotaByStorageTypeExceededException.class,
+        UnresolvedPathException.class);
+    }
+  }
   /**
    * set the modification and access time of a file
    *
@@ -2996,7 +3045,7 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
                       clientName);
     }
     final DFSOutputStream result = DFSOutputStream
-            .newStreamForSingleBlock(this, src, dfsClientConf.ioBufferSize,
+            .newStreamForSingleBlock(this, src,
                     progress, block, dfsClientConf.createChecksum(checksumOpt), stat);
     return result;
   }

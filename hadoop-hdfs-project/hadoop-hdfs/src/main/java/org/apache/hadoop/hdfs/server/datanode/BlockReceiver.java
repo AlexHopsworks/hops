@@ -24,7 +24,7 @@ import java.io.Writer;
 import org.apache.commons.logging.Log;
 import org.apache.hadoop.fs.ChecksumException;
 import org.apache.hadoop.fs.FSOutputSummer;
-import org.apache.hadoop.hdfs.StorageType;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
@@ -142,14 +142,18 @@ class BlockReceiver implements Closeable {
   private long lastResponseTime = 0;
   private boolean isReplaceBlock = false;
   private DataOutputStream replyOut = null;
+  
+  private boolean pinning;
 
   BlockReceiver(final ExtendedBlock block, final StorageType storageType,
       final DataInputStream in,
       final String inAddr, final String myAddr,
-      final BlockConstructionStage stage, final long newGs,
-      final long minBytesRcvd, final long maxBytesRcvd, final String clientname,
-      final DatanodeInfo srcDataNode, final DataNode datanode,
-      DataChecksum requestedChecksum, CachingStrategy cachingStrategy) throws IOException {
+      final BlockConstructionStage stage, 
+      final long newGs, final long minBytesRcvd, final long maxBytesRcvd, 
+      final String clientname, final DatanodeInfo srcDataNode,
+      final DataNode datanode, DataChecksum requestedChecksum, 
+      CachingStrategy cachingStrategy,
+      final boolean pinning) throws IOException {
     try {
       this.block = block;
       this.in = in;
@@ -173,12 +177,15 @@ class BlockReceiver implements Closeable {
       this.isTransfer = stage == BlockConstructionStage.TRANSFER_RBW ||
           stage == BlockConstructionStage.TRANSFER_FINALIZED;
 
+      this.pinning = pinning;
       if (LOG.isDebugEnabled()) {
-        LOG.debug(
-            getClass().getSimpleName() + ": " + block
-                + "\n  isClient  =" + isClient + ", clientname=" + clientname
-                + "\n  isDatanode=" + isDatanode + ", srcDataNode=" + srcDataNode
-                + "\n  inAddr=" + inAddr + ", myAddr=" + myAddr + "\n  cachingStrategy = " + cachingStrategy);
+        LOG.debug(getClass().getSimpleName() + ": " + block
+            + "\n  isClient  =" + isClient + ", clientname=" + clientname
+            + "\n  isDatanode=" + isDatanode + ", srcDataNode=" + srcDataNode
+            + "\n  inAddr=" + inAddr + ", myAddr=" + myAddr
+            + "\n  cachingStrategy = " + cachingStrategy
+            + "\n  pinning=" + pinning
+            );
       }
 
       //
@@ -199,20 +206,12 @@ class BlockReceiver implements Closeable {
             break;
           case PIPELINE_SETUP_APPEND:
             replicaHandler = datanode.data.append(block, newGs, minBytesRcvd);
-            if (datanode.blockScanner != null) { // remove from block scanner
-              datanode.blockScanner
-                  .deleteBlock(block.getBlockPoolId(), block.getLocalBlock());
-            }
             block.setGenerationStamp(newGs);
             datanode.notifyNamenodeAppendingBlock(block, replicaHandler.getReplica().getStorageUuid());
             break;
           case PIPELINE_SETUP_APPEND_RECOVERY:
             replicaHandler =
                 datanode.data.recoverAppend(block, newGs, minBytesRcvd);
-            if (datanode.blockScanner != null) { // remove from block scanner
-              datanode.blockScanner
-                  .deleteBlock(block.getBlockPoolId(), block.getLocalBlock());
-            }
             block.setGenerationStamp(newGs);
             datanode.notifyNamenodeAppendingRecoveredAppend(block, replicaHandler.getReplica().getStorageUuid());
             break;
@@ -662,6 +661,7 @@ class BlockReceiver implements Closeable {
               .setLastChecksumAndDataLen(offsetInBlock, lastChunkChecksum);
 
           datanode.metrics.incrBytesWritten(len);
+          datanode.metrics.incrTotalWriteTime(duration);
 
           manageWriterOsCache(offsetInBlock);
         }
@@ -982,9 +982,7 @@ class BlockReceiver implements Closeable {
     LAST_IN_PIPELINE,
     HAS_DOWNSTREAM_IN_PIPELINE
   }
-  
-  private static Status[] MIRROR_ERROR_STATUS = {Status.SUCCESS, Status.ERROR};
-  
+
   /**
    * Processes responses from downstream datanodes in the pipeline
    * and sends back replies to the originator.
@@ -1101,7 +1099,7 @@ class BlockReceiver implements Closeable {
       LOG.info("Sending an out of band ack of type " + ackStatus);
       try {
         sendAckUpstreamUnprotected(null, PipelineAck.UNKOWN_SEQNO, 0L, 0L,
-            ackStatus);
+            PipelineAck.combineHeader(datanode.getECN(), ackStatus));
       } finally {
         // Let others send ack. Unless there are miltiple OOB send
         // calls, there can be only one waiter, the responder thread.
@@ -1182,7 +1180,8 @@ class BlockReceiver implements Closeable {
               if (oobStatus != null) {
                 LOG.info("Relaying an out of band ack of type " + oobStatus);
                 sendAckUpstream(ack, PipelineAck.UNKOWN_SEQNO, 0L, 0L,
-                    Status.SUCCESS);
+                    PipelineAck.combineHeader(datanode.getECN(),
+                      Status.SUCCESS));
                 continue;
               }
               seqno = ack.getSeqno();
@@ -1256,9 +1255,10 @@ class BlockReceiver implements Closeable {
             finalizeBlock(startTime);
           }
 
+          Status myStatus = pkt != null ? pkt.ackStatus : Status.SUCCESS;
           sendAckUpstream(ack, expected, totalAckTimeNanos,
-              (pkt != null ? pkt.offsetInBlock : 0), 
-              (pkt != null ? pkt.ackStatus : Status.SUCCESS));
+            (pkt != null ? pkt.offsetInBlock : 0),
+            PipelineAck.combineHeader(datanode.getECN(), myStatus));
           if (pkt != null) {
             // remove the packet from the ack queue
             removeAckHead();
@@ -1295,7 +1295,13 @@ class BlockReceiver implements Closeable {
           : 0;
       block.setNumBytes(replicaInfo.getNumBytes());
       datanode.data.finalizeBlock(block);
-      datanode.closeBlock(block, DataNode.EMPTY_DEL_HINT, replicaInfo.getStorageUuid());
+      
+      if (pinning) {
+        datanode.data.setPinning(block);
+      }
+      
+      datanode.closeBlock(
+          block, DataNode.EMPTY_DEL_HINT, replicaInfo.getStorageUuid());
       if (ClientTraceLog.isInfoEnabled() && isClient) {
         long offset = 0;
         DatanodeRegistration dnR = datanode.getDNRegistrationForBP(block
@@ -1318,11 +1324,12 @@ class BlockReceiver implements Closeable {
      * @param totalAckTimeNanos total ack time including all the downstream
      * nodes
      * @param offsetInBlock offset in block for the data in packet
-     * @param myStatus the local ack status
+     * @param myHeader the local ack header
      */
     private void sendAckUpstream(PipelineAck ack, long seqno,
-        long totalAckTimeNanos, long offsetInBlock, Status myStatus) throws IOException {
-            try {
+        long totalAckTimeNanos, long offsetInBlock,
+        int myHeader) throws IOException {
+      try {
         // Wait for other sender to finish. Unless there is an OOB being sent,
         // the responder won't have to wait.
         synchronized(this) {
@@ -1335,7 +1342,7 @@ class BlockReceiver implements Closeable {
         try {
           if (!running) return;
           sendAckUpstreamUnprotected(ack, seqno, totalAckTimeNanos,
-              offsetInBlock, myStatus);
+              offsetInBlock, myHeader);
         } finally {
           synchronized(this) {
             sending = false;
@@ -1355,32 +1362,34 @@ class BlockReceiver implements Closeable {
      * @param totalAckTimeNanos total ack time including all the downstream
      *          nodes
      * @param offsetInBlock offset in block for the data in packet
-     * @param myStatus the local ack status
+     * @param myHeader the local ack header
      */
     private void sendAckUpstreamUnprotected(PipelineAck ack, long seqno,
-        long totalAckTimeNanos, long offsetInBlock, Status myStatus)
+        long totalAckTimeNanos, long offsetInBlock, int myHeader)
         throws IOException {
-      Status[] replies = null;
+      final int[] replies;
       if (ack == null) {
         // A new OOB response is being sent from this node. Regardless of
         // downstream nodes, reply should contain one reply.
-        replies = new Status[1];
-        replies[0] = myStatus;
+        replies = new int[] { myHeader };
       } else if (mirrorError) { // ack read error
-        replies = MIRROR_ERROR_STATUS;
+        int h = PipelineAck.combineHeader(datanode.getECN(), Status.SUCCESS);
+        int h1 = PipelineAck.combineHeader(datanode.getECN(), Status.ERROR);
+        replies = new int[] {h, h1};
       } else {
         short ackLen = type == PacketResponderType.LAST_IN_PIPELINE ? 0 : ack
             .getNumOfReplies();
-        replies = new Status[1 + ackLen];
-        replies[0] = myStatus;
-        for (int i = 0; i < ackLen; i++) {
+        replies = new int[ackLen + 1];
+        replies[0] = myHeader;
+        for (int i = 0; i < ackLen; ++i) {
           replies[i + 1] = ack.getReply(i);
         }
         // If the mirror has reported that it received a corrupt packet,
-        // do self-destruct to mark myself bad, instead of making the 
+        // do self-destruct to mark myself bad, instead of making the
         // mirror node bad. The mirror is guaranteed to be good without
         // corrupt data on disk.
-        if (ackLen > 0 && replies[1] == Status.ERROR_CHECKSUM) {
+        if (ackLen > 0 && PipelineAck.getStatusFromHeader(replies[1]) ==
+          Status.ERROR_CHECKSUM) {
           throw new IOException("Shutting down writer and responder "
               + "since the down streams reported the data sent by this "
               + "thread is corrupt");
@@ -1405,7 +1414,8 @@ class BlockReceiver implements Closeable {
         LOG.debug(myString + ", replyAck=" + replyAck);
       }
       // If a corruption was detected in the received data, terminate after
-      // sending ERROR_CHECKSUM back. 
+      // sending ERROR_CHECKSUM back.
+      Status myStatus = PipelineAck.getStatusFromHeader(myHeader);
       if (myStatus == Status.ERROR_CHECKSUM) {
         throw new IOException("Shutting down writer and responder "
             + "due to a checksum error in received data. The error "
@@ -1425,7 +1435,7 @@ class BlockReceiver implements Closeable {
       }
     }
   }
-  
+
   /**
    * This information is cached by the Datanode in the ackQueue.
    */

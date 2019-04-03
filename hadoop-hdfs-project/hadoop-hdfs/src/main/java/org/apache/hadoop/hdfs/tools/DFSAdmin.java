@@ -20,6 +20,21 @@ package org.apache.hadoop.hdfs.tools;
 import com.google.common.base.Joiner;
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
+import java.io.File;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.URL;
+import java.security.PrivilegedExceptionAction;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.TreeSet;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -33,6 +48,7 @@ import org.apache.hadoop.fs.FsStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.shell.Command;
 import org.apache.hadoop.fs.shell.CommandFormat;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
@@ -47,14 +63,19 @@ import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.ipc.RemoteException;
+import org.apache.hadoop.ipc.ProtobufRpcEngine;
+import org.apache.hadoop.ipc.RefreshCallQueueProtocol;
+import org.apache.hadoop.ipc.GenericRefreshProtocol;
+import org.apache.hadoop.ipc.RefreshResponse;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.RefreshUserMappingsProtocol;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.authorize.RefreshAuthorizationPolicyProtocol;
+import org.apache.hadoop.ipc.protocolPB.GenericRefreshProtocolClientSideTranslatorPB;
+import org.apache.hadoop.ipc.protocolPB.GenericRefreshProtocolPB;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.ToolRunner;
 
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.net.InetSocketAddress;
@@ -167,10 +188,8 @@ public class DFSAdmin extends FsShell {
             "\t\tNote: A quota of 1 would force the directory to remain empty.\n";
 
     private final long quota; // the quota to be set
-    
-    /**
-     * Constructor
-     */
+
+    /** Constructor */
     SetQuotaCommand(String[] args, int pos, FileSystem fs) {
       super(fs);
       CommandFormat c = new CommandFormat(2, Integer.MAX_VALUE);
@@ -206,21 +225,27 @@ public class DFSAdmin extends FsShell {
    */
   private static class ClearSpaceQuotaCommand extends DFSAdminCommand {
     private static final String NAME = "clrSpaceQuota";
-    private static final String USAGE = "-" + NAME + " <dirname>...<dirname>";
+    private static final String USAGE = "-"+NAME+" [-storageType <storagetype>] <dirname>...<dirname>";
     private static final String DESCRIPTION = USAGE + ": " +
-        "Clear the disk space quota for each directory <dirName>.\n" +
-        "\t\tFor each directory, attempt to clear the quota. An error will be reported if\n" +
-        "\t\t1. the directory does not exist or is a file, or\n" +
-        "\t\t2. user is not an administrator.\n" +
-        "\t\tIt does not fault if the directory has no quota.";
-    
-    /**
-     * Constructor
-     */
+    "Clear the space quota for each directory <dirName>.\n" +
+    "\t\tFor each directory, attempt to clear the quota. An error will be reported if\n" +
+    "\t\t1. the directory does not exist or is a file, or\n" +
+    "\t\t2. user is not an administrator.\n" +
+    "\t\tIt does not fault if the directory has no quota.\n" +
+    "\t\tThe storage type specific quota is cleared when -storageType option is specified.";
+
+    private StorageType type;
+
+    /** Constructor */
     ClearSpaceQuotaCommand(String[] args, int pos, FileSystem fs) {
       super(fs);
       CommandFormat c = new CommandFormat(1, Integer.MAX_VALUE);
       List<String> parameters = c.parse(args, pos);
+      String storageTypeString =
+          StringUtils.popOptionWithArgument("-storageType", parameters);
+      if (storageTypeString != null) {
+        this.type = StorageType.parseStorageType(storageTypeString);
+      }
       this.args = parameters.toArray(new String[parameters.size()]);
     }
     
@@ -242,8 +267,11 @@ public class DFSAdmin extends FsShell {
 
     @Override
     public void run(Path path) throws IOException {
-      dfs.setQuota(path, HdfsConstants.QUOTA_DONT_SET,
-          HdfsConstants.QUOTA_RESET);
+      if (type != null) {
+        dfs.setQuotaByStorageType(path, type, HdfsConstants.QUOTA_RESET);
+      } else {
+        dfs.setQuota(path, HdfsConstants.QUOTA_DONT_SET, HdfsConstants.QUOTA_RESET);
+      }
     }
   }
   
@@ -253,21 +281,23 @@ public class DFSAdmin extends FsShell {
   private static class SetSpaceQuotaCommand extends DFSAdminCommand {
     private static final String NAME = "setSpaceQuota";
     private static final String USAGE =
-        "-" + NAME + " <quota> <dirname>...<dirname>";
+      "-"+NAME+" <quota> [-storageType <storagetype>] <dirname>...<dirname>";
     private static final String DESCRIPTION = USAGE + ": " +
-        "Set the disk space quota <quota> for each directory <dirName>.\n" +
-        "\t\tThe space quota is a long integer that puts a hard limit\n" +
-        "\t\ton the total size of all the files under the directory tree.\n" +
-        "\t\tThe extra space required for replication is also counted. E.g.\n" +
-        "\t\ta 1GB file with replication of 3 consumes 3GB of the quota.\n\n" +
-        "\t\tQuota can also be specified with a binary prefix for terabytes,\n" +
-        "\t\tpetabytes etc (e.g. 50t is 50TB, 5m is 5MB, 3p is 3PB).\n" +
-        "\t\tFor each directory, attempt to set the quota. An error will be reported if\n" +
-        "\t\t1. N is not a positive integer, or\n" +
-        "\t\t2. user is not an administrator, or\n" +
-        "\t\t3. the directory does not exist or is a file, or\n";
+      "Set the space quota <quota> for each directory <dirName>.\n" +
+      "\t\tThe space quota is a long integer that puts a hard limit\n" +
+      "\t\ton the total size of all the files under the directory tree.\n" +
+      "\t\tThe extra space required for replication is also counted. E.g.\n" +
+      "\t\ta 1GB file with replication of 3 consumes 3GB of the quota.\n\n" +
+      "\t\tQuota can also be specified with a binary prefix for terabytes,\n" +
+      "\t\tpetabytes etc (e.g. 50t is 50TB, 5m is 5MB, 3p is 3PB).\n" + 
+      "\t\tFor each directory, attempt to set the quota. An error will be reported if\n" +
+      "\t\t1. N is not a positive integer, or\n" +
+      "\t\t2. user is not an administrator, or\n" +
+      "\t\t3. the directory does not exist or is a file.\n" +
+      "\t\tThe storage type specific quota is set when -storageType option is specified.\n";
 
     private long quota; // the quota to be set
+    private StorageType type;
     
     /**
      * Constructor
@@ -282,6 +312,11 @@ public class DFSAdmin extends FsShell {
       } catch (NumberFormatException nfe) {
         throw new IllegalArgumentException(
             "\"" + str + "\" is not a valid value for a quota.");
+      }
+      String storageTypeString =
+          StringUtils.popOptionWithArgument("-storageType", parameters);
+      if (storageTypeString != null) {
+        this.type = StorageType.parseStorageType(storageTypeString);
       }
       
       this.args = parameters.toArray(new String[parameters.size()]);
@@ -305,7 +340,11 @@ public class DFSAdmin extends FsShell {
 
     @Override
     public void run(Path path) throws IOException {
-      dfs.setQuota(path, HdfsConstants.QUOTA_DONT_SET, quota);
+      if (type != null) {
+        dfs.setQuotaByStorageType(path, type, quota);
+      } else {
+        dfs.setQuota(path, HdfsConstants.QUOTA_DONT_SET, quota);
+      }
     }
   }
   
@@ -524,13 +563,9 @@ public class DFSAdmin extends FsShell {
   /**
    * Safe mode maintenance command.
    * Usage: hdfs dfsadmin -safemode [enter | leave | get]
-   *
-   * @param argv
-   *     List of of command line parameters.
-   * @param idx
-   *     The index of the command that is being processed.
-   * @throws IOException
-   *     if the filesystem does not exist.
+   * @param argv List of of command line parameters.
+   * @param idx The index of the command that is being processed.
+   * @exception IOException if the filesystem does not exist.
    */
   public void setSafeMode(String[] argv, int idx) throws IOException {
     if (idx != argv.length - 1) {
@@ -700,10 +735,16 @@ public class DFSAdmin extends FsShell {
     String refreshSuperUserGroupsConfiguration =
         "-refreshSuperUserGroupsConfiguration: Refresh superuser proxy groups mappings\n";
 
+    String refreshCallQueue = "-refreshCallQueue: Reload the call queue from config\n";
+    
     String reconfig = "-reconfig <datanode|...> <host:ipc_port> <start|status>:\n" +
         "\tStarts reconfiguration or gets the status of an ongoing reconfiguration.\n" +
         "\tThe second parameter specifies the node type.\n" +
         "\tCurrently, only reloading DataNode's configuration is supported.\n";
+    
+    String genericRefresh = "-refresh: Arguments are <hostname:port> <resource_identifier> [arg1..argn]\n" +
+      "\tTriggers a runtime-refresh of the resource specified by <resource_identifier>\n" +
+      "\ton <hostname:port>. All other args after are sent to the host.";
     
     String printTopology =
         "-printTopology: Print a tree of the racks and their\n" +
@@ -770,6 +811,10 @@ public class DFSAdmin extends FsShell {
       System.out.println(refreshUserToGroupsMappings);
     } else if ("refreshSuperUserGroupsConfiguration".equals(cmd)) {
       System.out.println(refreshSuperUserGroupsConfiguration);
+    } else if ("refreshCallQueue".equals(cmd)) {
+      System.out.println(refreshCallQueue);
+    } else if ("refresh".equals(cmd)) {
+      System.out.println(genericRefresh);
     } else if ("reconfig".equals(cmd)) {
       System.out.println(reconfig);
     } else if ("printTopology".equals(cmd)) {
@@ -797,6 +842,8 @@ public class DFSAdmin extends FsShell {
       System.out.println(refreshServiceAcl);
       System.out.println(refreshUserToGroupsMappings);
       System.out.println(refreshSuperUserGroupsConfiguration);
+      System.out.println(refreshCallQueue);
+      System.out.println(genericRefresh);
       System.out.println(reconfig);
       System.out.println(printTopology);
       System.out.println(deleteBlockPool);
@@ -944,6 +991,27 @@ public class DFSAdmin extends FsShell {
 
     return 0;
   }
+  
+  public int refreshCallQueue() throws IOException {
+    // Get the current configuration
+    Configuration conf = getConf();
+    
+    // for security authorization
+    // server principal for this call   
+    // should be NN's one.
+    conf.set(CommonConfigurationKeys.HADOOP_SECURITY_SERVICE_USER_NAME_KEY, 
+        conf.get(DFSConfigKeys.DFS_NAMENODE_KERBEROS_PRINCIPAL_KEY, ""));
+ 
+    // Create the client
+    RefreshCallQueueProtocol refreshProtocol =
+      NameNodeProxies.createProxy(conf, FileSystem.getDefaultUri(conf),
+          RefreshCallQueueProtocol.class).getProxy();
+
+    // Refresh the call queue
+    refreshProtocol.refreshCallQueue();
+    
+    return 0;
+  }
 
   public int reconfig(String[] argv, int i) throws IOException {
     String nodeType = argv[i];
@@ -1014,6 +1082,60 @@ public class DFSAdmin extends FsShell {
     }
     return 0;
   }
+  public int genericRefresh(String[] argv, int i) throws IOException {
+    String hostport = argv[i++];
+    String identifier = argv[i++];
+    String[] args = Arrays.copyOfRange(argv, i, argv.length);
+
+    // Get the current configuration
+    Configuration conf = getConf();
+
+    // for security authorization
+    // server principal for this call
+    // should be NN's one.
+    conf.set(CommonConfigurationKeys.HADOOP_SECURITY_SERVICE_USER_NAME_KEY,
+      conf.get(DFSConfigKeys.DFS_NAMENODE_KERBEROS_PRINCIPAL_KEY, ""));
+
+    // Create the client
+    Class<?> xface = GenericRefreshProtocolPB.class;
+    InetSocketAddress address = NetUtils.createSocketAddr(hostport);
+    UserGroupInformation ugi = UserGroupInformation.getCurrentUser();
+
+    RPC.setProtocolEngine(conf, xface, ProtobufRpcEngine.class);
+    GenericRefreshProtocolPB proxy = (GenericRefreshProtocolPB)
+      RPC.getProxy(xface, RPC.getProtocolVersion(xface), address,
+        ugi, conf, NetUtils.getDefaultSocketFactory(conf), 0);
+
+    Collection<RefreshResponse> responses = null;
+    try (GenericRefreshProtocolClientSideTranslatorPB xlator =
+        new GenericRefreshProtocolClientSideTranslatorPB(proxy);) {
+      // Refresh
+      responses = xlator.refresh(identifier, args);
+
+      int returnCode = 0;
+
+      // Print refresh responses
+      System.out.println("Refresh Responses:\n");
+      for (RefreshResponse response : responses) {
+        System.out.println(response.toString());
+
+        if (returnCode == 0 && response.getReturnCode() != 0) {
+          // This is the first non-zero return code, so we should return this
+          returnCode = response.getReturnCode();
+        } else if (returnCode != 0 && response.getReturnCode() != 0) {
+          // Then now we have multiple non-zero return codes,
+          // so we merge them into -1
+          returnCode = - 1;
+        }
+      }
+      return returnCode;
+    } finally {
+      if (responses == null) {
+        System.out.println("Failed to get response.\n");
+        return -1;
+      }
+    }
+  }
 
   /**
    * Displays format of commands.
@@ -1053,9 +1175,15 @@ public class DFSAdmin extends FsShell {
     } else if ("-refreshSuperUserGroupsConfiguration".equals(cmd)) {
       System.err.println("Usage: hdfs dfsadmin"
                          + " [-refreshSuperUserGroupsConfiguration]");
-    } else if ("-reconfig".equals(cmd)) {
+    } else if ("-refreshCallQueue".equals(cmd)) {
       System.err.println("Usage: java DFSAdmin"
+                         + " [-refreshCallQueue]");
+    } else if ("-reconfig".equals(cmd)) {
+      System.err.println("Usage: hdfs dfsadmin"
                          + " [-reconfig <datanode|...> <host:port> <start|status>]");
+    } else if ("-refresh".equals(cmd)) {
+      System.err.println("Usage: java DFSAdmin"
+                         + " [-refresh <hostname:port> <resource_identifier> [arg1..argn]");
     } else if ("-printTopology".equals(cmd)) {
       System.err.println("Usage: hdfs dfsadmin" + " [-printTopology]");
     } else if ("-deleteBlockPool".equals(cmd)) {
@@ -1071,7 +1199,7 @@ public class DFSAdmin extends FsShell {
       System.err.println("Usage: hdfs dfsadmin"
           + " [-getDatanodeInfo <datanode_host:ipc_port>]");
     } else if ("-triggerBlockReport".equals(cmd)) {
-      System.err.println("Usage: java DFSAdmin"
+      System.err.println("Usage: hdfs dfsadmin"
           + " [-triggerBlockReport [-incremental] <datanode_host:ipc_port>]");
     } else {
       System.err.println("Usage: hdfs dfsadmin");
@@ -1125,6 +1253,11 @@ public class DFSAdmin extends FsShell {
       }
     } else if ("-refreshServiceAcl".equals(cmd)) {
       if (argv.length != 1) {
+        printUsage(cmd);
+        return exitCode;
+      }
+    } else if ("-refresh".equals(cmd)) {
+      if (argv.length < 3) {
         printUsage(cmd);
         return exitCode;
       }
@@ -1209,6 +1342,10 @@ public class DFSAdmin extends FsShell {
         exitCode = refreshUserToGroupsMappings();
       } else if ("-refreshSuperUserGroupsConfiguration".equals(cmd)) {
         exitCode = refreshSuperUserGroupsConfiguration();
+      } else if ("-refreshCallQueue".equals(cmd)) {
+        exitCode = refreshCallQueue();
+      } else if ("-refresh".equals(cmd)) {
+        exitCode = genericRefresh(argv, i);
       } else if ("-printTopology".equals(cmd)) {
         exitCode = printTopology();
       } else if ("-deleteBlockPool".equals(cmd)) {

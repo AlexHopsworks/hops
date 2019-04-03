@@ -37,6 +37,10 @@ public class HdfsDataInputStream extends FSDataInputStream {
   public HdfsDataInputStream(DFSInputStream in) throws IOException {
     super(in);
   }
+  
+  private DFSInputStream getDFSInputStream() {
+    return (DFSInputStream) in;
+  }
 
   /**
    * Get the datanode from which the stream is currently reading.
@@ -55,8 +59,8 @@ public class HdfsDataInputStream extends FSDataInputStream {
   /**
    * Get the collection of blocks that has already been located.
    */
-  public synchronized List<LocatedBlock> getAllBlocks() throws IOException {
-    return ((DFSInputStream) in).getAllBlocks();
+  public List<LocatedBlock> getAllBlocks() throws IOException {
+    return getDFSInputStream().getAllBlocks();
   }
 
   /**
@@ -75,7 +79,11 @@ public class HdfsDataInputStream extends FSDataInputStream {
    * be higher than you would expect just by adding up the number of
    * bytes read through HdfsDataInputStream.
    */
-  public synchronized DFSInputStream.ReadStatistics getReadStatistics() {
-    return ((DFSInputStream) in).getReadStatistics();
+  public DFSInputStream.ReadStatistics getReadStatistics() {
+    return getDFSInputStream().getReadStatistics();
+  }
+
+  public void clearReadStatistics() {
+    getDFSInputStream().clearReadStatistics();
   }
 }
