@@ -339,7 +339,6 @@ public abstract class INodeWithAdditionalFields extends INode {
     } catch (IOException ex) {
       throw new RuntimeException("provenance log error1", ex);
     }
-    String operationUser = ugi.getUserName();
     String appId = ugi.getApplicationId();
     if(appId == null) {
        appId = "notls";
@@ -367,7 +366,7 @@ public abstract class INodeWithAdditionalFields extends INode {
 
     FileProvenanceEntry ple = new FileProvenanceEntry(id, operationUserId, appId,
       logicalTime, logicalTime, timestamp, timestamp, parentId, partitionId,
-      projectId, datasetId, inodeName, operationUser, op);
+      projectId, datasetId, inodeName, op);
     try {
       EntityManager.add(ple);
     } catch (IOException ex) {
