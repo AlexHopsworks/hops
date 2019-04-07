@@ -159,7 +159,7 @@ public class FileProvenanceContext extends BaseEntityContext<FileProvenanceConte
     super.add(logEntry);
     log("provenance-log-added", "inodeId", logEntry.getInodeId(), "userId",
       logEntry.getUserId(), "appId", logEntry.getAppId(), "operation",
-      logEntry.getOperation());
+      logEntry.getOperationEnumVal());
   }
 
   @Override
