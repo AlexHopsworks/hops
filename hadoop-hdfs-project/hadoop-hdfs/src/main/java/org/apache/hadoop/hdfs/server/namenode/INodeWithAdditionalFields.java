@@ -344,35 +344,56 @@ public abstract class INodeWithAdditionalFields extends INode {
        appId = "notls";
     }
 
-    INodeDirectory datasetINode;
-    INodeDirectory projectINode;
+    INodeDirectory projectINode = null;
+    INodeDirectory datasetINode = null;
+    String path = null;
     try {
-      if (this instanceof INodeDirectory && ((INodeDirectory) this).isMetaEnabled()) {
+      if(isProject()) {
+        projectINode = (INodeDirectory) this;
+      } else if (isDataset()) {
         datasetINode = (INodeDirectory) this;
+        projectINode = datasetINode.getParent();
       } else {
         datasetINode = getMetaEnabledParent();
         if (datasetINode == null) {
           return;
         }
+        projectINode = datasetINode.getParent();
       }
-      projectINode = datasetINode.getParent();
+      path = getFullPathName();
+      if(path.length() > 998) {
+        path = path.substring(0, 998) + "..";
+      }
     } catch (IOException ex) {
       throw new RuntimeException("provenance log error2", ex);
     }
     long timestamp = getAccessTime();
     String inodeName = getLocalName();
     long projectId = projectINode.getId();
-    long datasetId = datasetINode.getId();
+    long datasetId = datasetINode == null ? 0l : datasetINode.getId();
 
     FileProvenanceEntry ple = new FileProvenanceEntry(id, operationUserId, appId,
       logicalTime, logicalTime, timestamp, timestamp, parentId, partitionId,
-      projectId, datasetId, inodeName, op);
+      projectId, datasetId, inodeName, op, path);
     try {
       EntityManager.add(ple);
     } catch (IOException ex) {
       throw new RuntimeException("provenance log error3", ex);
     }
   }
+  
+  private boolean isDataset() {
+    return this instanceof INodeDirectory && ((INodeDirectory) this).isMetaEnabled();
+  }
+  
+  private boolean isProject() {
+    try {
+      INodeDirectory projects = (INodeDirectory)INodeDirectory.getRootDir().getChild("Projects");
+      return this.getParent().equals(projects);
+    } catch (StorageException | TransactionContextException  ex) {
+      return false;
+    }
+  } 
   
   public final int getLogicalTime() {
     return logicalTime;

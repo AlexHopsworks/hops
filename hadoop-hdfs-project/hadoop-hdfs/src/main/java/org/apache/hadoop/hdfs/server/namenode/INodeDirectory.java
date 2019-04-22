@@ -458,8 +458,8 @@ public class INodeDirectory extends INodeWithAdditionalFields {
   
     if (logMetadataEvent) {
       node.logMetadataEvent(MetadataLogEntry.Operation.ADD);
-      node.logProvenanceEvent(FileProvenanceEntry.Operation.create());
     }
+    node.logProvenanceEvent(FileProvenanceEntry.Operation.create());
 
     return true;
   }
