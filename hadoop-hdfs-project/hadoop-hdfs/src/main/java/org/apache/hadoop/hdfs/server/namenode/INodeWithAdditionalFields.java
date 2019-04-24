@@ -360,12 +360,15 @@ public abstract class INodeWithAdditionalFields extends INode {
         }
         projectINode = datasetINode.getParent();
       }
-      path = getFullPathName();
+      path = parent.getFullPathName();
+      if(path == null) {
+        throw new RuntimeException("provenance log error2 - parent path");
+      }
       if(path.length() > 998) {
         path = path.substring(0, 998) + "..";
       }
     } catch (IOException ex) {
-      throw new RuntimeException("provenance log error2", ex);
+      throw new RuntimeException("provenance log error3", ex);
     }
     long timestamp = getAccessTime();
     String inodeName = getLocalName();
