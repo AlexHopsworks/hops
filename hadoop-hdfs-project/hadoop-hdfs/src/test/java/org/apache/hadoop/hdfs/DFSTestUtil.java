@@ -30,6 +30,9 @@ import io.hops.metadata.hdfs.dal.QuotaUpdateDataAccess;
 import io.hops.metadata.StorageMap;
 import io.hops.metadata.hdfs.dal.INodeDataAccess;
 import io.hops.metadata.hdfs.entity.INodeIdentifier;
+import io.hops.security.GroupAlreadyExistsException;
+import io.hops.security.HopsUGException;
+import io.hops.security.UserAlreadyExistsException;
 import io.hops.security.UsersGroups;
 import io.hops.transaction.handler.HDFSOperationType;
 import io.hops.transaction.handler.HopsTransactionalRequestHandler;
@@ -128,7 +131,12 @@ import org.junit.Assume;
 
 import static org.junit.Assert.assertEquals;
 import io.hops.metadata.hdfs.dal.DirectoryWithQuotaFeatureDataAccess;
+import org.apache.hadoop.hdfs.security.token.block.ExportedBlockKeys;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
+import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.namenode.DirectoryWithQuotaFeature;
+import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
+import org.apache.hadoop.util.VersionInfo;
 
 /**
  * Utilities for HDFS tests
@@ -206,7 +214,11 @@ public class DFSTestUtil {
     String superGroup = conf.get(DFS_PERMISSIONS_SUPERUSERGROUP_KEY,
         DFS_PERMISSIONS_SUPERUSERGROUP_DEFAULT);
 
-    UsersGroups.addUserToGroup(fsOwnerShortUserName, superGroup);
+    try {
+      UsersGroups.addUser(fsOwnerShortUserName);
+      UsersGroups.addGroup(superGroup);
+      UsersGroups.addUserToGroup(fsOwnerShortUserName, superGroup);
+    } catch (HopsUGException e){ }
   }
    
   /**
@@ -966,6 +978,9 @@ public class DFSTestUtil {
   static public FileSystem getFileSystemAs(UserGroupInformation ugi, 
       final Configuration conf) throws IOException {
     try {
+      UsersGroups.addUser(ugi.getUserName());
+    } catch (UserAlreadyExistsException e){}
+    try {
       return ugi.doAs(new PrivilegedExceptionAction<FileSystem>() {
         @Override
         public FileSystem run() throws Exception {
@@ -1130,6 +1145,11 @@ public class DFSTestUtil {
     return getDatanodeDescriptor(ipAddr, 
         DFSConfigKeys.DFS_DATANODE_DEFAULT_PORT, rackLocation, hostname);
   }
+  
+  public static DatanodeRegistration getLocalDatanodeRegistration() {
+    return new DatanodeRegistration(getLocalDatanodeID(), new StorageInfo(
+        HdfsServerConstants.NodeType.DATA_NODE), new ExportedBlockKeys(), VersionInfo.getVersion());
+  }
     
   public static DatanodeStorageInfo createDatanodeStorageInfo(
       String storageID, String ip) throws IOException {
@@ -1186,6 +1206,12 @@ public class DFSTestUtil {
   }
 
   public static void createRootFolder() throws IOException {
+    try {
+      UsersGroups.addUser("user");
+    } catch (UserAlreadyExistsException e) {}
+    try {
+      UsersGroups.addGroup("grp");
+    } catch (GroupAlreadyExistsException e) {}
     createRootFolder(new PermissionStatus("user", "grp", new FsPermission((short) 0755)));
   }
 

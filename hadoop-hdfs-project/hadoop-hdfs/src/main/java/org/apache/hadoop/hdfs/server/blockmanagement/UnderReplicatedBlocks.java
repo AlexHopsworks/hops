@@ -266,10 +266,7 @@ class UnderReplicatedBlocks implements Iterable<Block> {
                               int oldReplicas, 
                               int decommissionedReplicas,
                               int oldExpectedReplicas) throws IOException {
-    int priLevel = getPriority(block, oldReplicas, 
-                               decommissionedReplicas,
-                               oldExpectedReplicas);
-    boolean removedBlock = remove(block, priLevel);
+    boolean removedBlock = remove(block);
     return removedBlock;
   }
 
@@ -292,10 +289,10 @@ class UnderReplicatedBlocks implements Iterable<Block> {
    * @return true if the block was found and removed from one of the priority
    * queues
    */
-  boolean remove(BlockInfoContiguous block, int priLevel)
+  boolean remove(BlockInfoContiguous block)
       throws StorageException, TransactionContextException {
     UnderReplicatedBlock urb = getUnderReplicatedBlock(block);
-    if (priLevel >= 0 && priLevel < LEVEL && remove(urb)) {
+    if (remove(urb)) {
       NameNode.blockStateChangeLog.debug(
         "BLOCK* NameSystem.UnderReplicationBlock.remove: Removing block {}" +
             " from priority queue {}", block, urb.getLevel());
@@ -346,9 +343,12 @@ class UnderReplicatedBlocks implements Iterable<Block> {
           " curPri  " + curPri +
           " oldPri  " + oldPri);
     }
-    if(oldPri != curPri) {
-      remove(block, oldPri);
-    }
+    //as we use the inodeId and blockId as primary key the value will be overwriten
+    //and as ndb does not guaranty the order of the operation it is dangerous to do add an remove in
+    //the same transaction
+//    if(oldPri != curPri) {
+//      remove(block);
+//    }
     if(add(block, curPri, curExpectedReplicas, true)) {
       NameNode.blockStateChangeLog.debug(
           "BLOCK* NameSystem.UnderReplicationBlock.update: {} has only {} " +

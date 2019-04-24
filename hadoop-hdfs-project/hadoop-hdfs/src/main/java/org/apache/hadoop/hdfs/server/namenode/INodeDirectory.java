@@ -454,6 +454,7 @@ public class INodeDirectory extends INodeWithAdditionalFields {
     increaseChildrenNum();
     if (node.getGroupName() == null) {
       node.setGroup(getGroupName());
+      node.setGroupID(getGroupID());
     }
   
     if (logMetadataEvent) {

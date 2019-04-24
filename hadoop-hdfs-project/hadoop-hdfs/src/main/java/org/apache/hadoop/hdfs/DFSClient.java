@@ -23,6 +23,8 @@ import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BYTES_PER_CHECKSUM_DEFAUL
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BYTES_PER_CHECKSUM_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_BLOCK_WRITE_LOCATEFOLLOWINGBLOCK_RETRIES_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_BLOCK_WRITE_LOCATEFOLLOWINGBLOCK_RETRIES_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_BLOCK_WRITE_LOCATEFOLLOWINGBLOCK_INITIAL_DELAY_DEFAULT;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_BLOCK_WRITE_LOCATEFOLLOWINGBLOCK_INITIAL_DELAY_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_BLOCK_WRITE_RETRIES_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_BLOCK_WRITE_RETRIES_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_CACHED_CONN_RETRY_DEFAULT;
@@ -70,12 +72,7 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
-import java.net.Socket;
-import java.net.SocketAddress;
-import java.net.URI;
-import java.net.UnknownHostException;
+import java.net.*;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -91,6 +88,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.apache.hadoop.hdfs.protocolPB.ClientNamenodeProtocolPB;
+import org.apache.hadoop.hdfs.protocolPB.ClientNamenodeProtocolTranslatorPB;
+import org.apache.hadoop.ipc.ProtocolTranslator;
 import org.apache.hadoop.net.StandardSocketFactory;
 import org.apache.hadoop.util.Daemon;
 
@@ -190,7 +190,6 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.net.InetAddresses;
-import java.net.ConnectException;
 import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.fs.FsTracer;
 import org.apache.hadoop.hdfs.shortcircuit.DomainSocketFactory;
@@ -279,6 +278,7 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
     final int nCachedConnRetry;
     final int nBlockWriteRetry;
     final int nBlockWriteLocateFollowingRetry;
+    final int blockWriteLocateFollowingInitialDelayMs;
     final long defaultBlockSize;
     final long prefetchSize;
     final short defaultReplication;
@@ -316,6 +316,9 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
     final long shortCircuitMmapCacheExpiryMs;
     final long shortCircuitMmapCacheRetryTimeout;
     final long shortCircuitCacheStaleThresholdMs;
+
+    public BlockReaderFactory.FailureInjector brfFailureInjector =
+      new BlockReaderFactory.FailureInjector();
 
     public Conf(Configuration conf) {
       // The hdfsTimeout is currently the same as the ipc timeout
@@ -394,6 +397,9 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
       nBlockWriteLocateFollowingRetry = conf.getInt(
           DFS_CLIENT_BLOCK_WRITE_LOCATEFOLLOWINGBLOCK_RETRIES_KEY,
           DFS_CLIENT_BLOCK_WRITE_LOCATEFOLLOWINGBLOCK_RETRIES_DEFAULT);
+      blockWriteLocateFollowingInitialDelayMs = conf.getInt(
+          DFS_CLIENT_BLOCK_WRITE_LOCATEFOLLOWINGBLOCK_INITIAL_DELAY_KEY,
+          DFS_CLIENT_BLOCK_WRITE_LOCATEFOLLOWINGBLOCK_INITIAL_DELAY_DEFAULT);
       uMask = FsPermission.getUMask(conf);
       connectToDnViaHostname = conf.getBoolean(DFS_CLIENT_USE_DN_HOSTNAME,
           DFS_CLIENT_USE_DN_HOSTNAME_DEFAULT);
@@ -547,6 +553,11 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
             + myOpt.getChecksumType().name());
       }
       return dataChecksum;
+    }
+
+    @VisibleForTesting
+    public int getBlockWriteLocateFollowingInitialDelayMs() {
+      return blockWriteLocateFollowingInitialDelayMs;
     }
   }
 
@@ -2424,7 +2435,7 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
     }
     try (TraceScope ignored = tracer.newScope("setSafeMode")) {
       for (ClientProtocol nn : allNNs) {
-        if (!nn.equals(leaderNN)) {
+        if (!proxyEquals(nn, leaderNN)) {
           nn.setSafeMode(action, isChecked);
         }
       }
@@ -2591,6 +2602,7 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
   public boolean primitiveMkdir(String src, FsPermission absPermission,
     boolean createParent)
     throws IOException {
+
     checkOpen();
     if (absPermission == null) {
       absPermission =
@@ -2677,7 +2689,7 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
       throw new IllegalArgumentException("Don't support Quota for storage type : "
         + type.toString());
     }
-    try {
+    try (TraceScope ignored = newPathTraceScope("setQuotaByStorageType", src)) {
       namenode.setQuota(src, HdfsConstants.QUOTA_DONT_SET, quota, type);
     } catch (RemoteException re) {
       throw re.unwrapRemoteException(AccessControlException.class,
@@ -3156,20 +3168,35 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
   public boolean hasLeader(){
     return leaderNN!=null;
   }
-  
-  public void addUserGroup(final String userName, final String groupName)
-      throws IOException {
+
+  public void addUser(String userName) throws IOException{
     try{
-      namenode.addUserGroup(userName, groupName, false);
+      namenode.addUser(userName);
     }catch (RemoteException re){
       throw re.unwrapRemoteException();
     }
-  
+  }
+
+  public void addGroup(String groupName) throws IOException{
+    try{
+      namenode.addGroup(groupName);
+    }catch (RemoteException re){
+      throw re.unwrapRemoteException();
+    }
+  }
+
+  public void addUserToGroup(String userName, String groupName) throws IOException{
+    try{
+      namenode.addUserToGroup(userName, groupName);
+    }catch (RemoteException re){
+      throw re.unwrapRemoteException();
+    }
+
     if(userName != null && groupName != null){
       for(ClientProtocol nn : allNNs) {
         try{
-          if(!nn.equals(namenode)) {
-            nn.addUserGroup(userName, groupName, true);
+          if(!proxyEquals(nn,namenode)) {
+            nn.invCachesUserAddedToGroup(userName, groupName);
           }
         }catch (RemoteException re){
           throw re.unwrapRemoteException();
@@ -3177,26 +3204,67 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
       }
     }
   }
-  
-  public void removeUserGroup(final String userName, final String groupName)
-      throws IOException {
+
+  public void removeUser(String userName) throws IOException{
     try{
-      namenode.removeUserGroup(userName, groupName, false);
+      namenode.removeUser(userName);
     }catch (RemoteException re){
       throw re.unwrapRemoteException();
     }
-  
-    for(ClientProtocol nn : allNNs) {
-      try{
-        if (!nn.equals(namenode)) {
-          nn.removeUserGroup(userName, groupName, true);
+
+    if(userName != null){
+      for(ClientProtocol nn : allNNs) {
+        try{
+          if(!proxyEquals(nn,namenode)) {
+            nn.invCachesUserRemoved(userName);
+          }
+        }catch (RemoteException re){
+          throw re.unwrapRemoteException();
         }
-      }catch (RemoteException re){
-        throw re.unwrapRemoteException();
       }
     }
   }
-  
+
+  public void removeGroup(String groupName) throws IOException{
+    try{
+      namenode.removeGroup(groupName);
+    }catch (RemoteException re){
+      throw re.unwrapRemoteException();
+    }
+
+    if(groupName != null){
+      for(ClientProtocol nn : allNNs) {
+        try{
+          if(!proxyEquals(nn,namenode)) {
+            nn.invCachesGroupRemoved(groupName);
+          }
+        }catch (RemoteException re){
+          throw re.unwrapRemoteException();
+        }
+      }
+    }
+  }
+
+  public void removeUserFromGroup(String userName, String groupName) throws IOException{
+    try{
+      namenode.removeUserFromGroup(userName, groupName);
+    }catch (RemoteException re){
+      throw re.unwrapRemoteException();
+    }
+
+    if(userName != null && groupName != null){
+      for(ClientProtocol nn : allNNs) {
+        try{
+          if(!proxyEquals(nn,namenode)) {
+            nn.invCachesUserRemovedFromGroup(userName, groupName);
+          }
+        }catch (RemoteException re){
+          throw re.unwrapRemoteException();
+        }
+      }
+    }
+  }
+
   @VisibleForTesting
   @InterfaceAudience.Private
   public void setNamenodes(Collection<ClientProtocol> namenodes){
@@ -3234,5 +3302,20 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
    */
   public SaslDataTransferClient getSaslDataTransferClient() {
     return saslClient;
+  }
+
+  private boolean proxyEquals(ClientProtocol a, ClientProtocol b ){
+    //only for unit testing
+    if(! (a instanceof ProtocolTranslator) && !(b instanceof ProtocolTranslator)){
+      return a.equals(b);
+    }else{
+      Client.ConnectionId id1 = RPC.getConnectionIdForProxy(a);
+      Client.ConnectionId id2 = RPC.getConnectionIdForProxy(b);
+      if(id1.getAddress().equals(id2.getAddress())){
+        return true;
+      }
+      return false;
+    }
+
   }
 }

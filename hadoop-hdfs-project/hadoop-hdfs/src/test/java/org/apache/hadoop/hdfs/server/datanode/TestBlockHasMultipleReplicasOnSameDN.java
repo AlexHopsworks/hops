@@ -17,6 +17,7 @@
  */
 package org.apache.hadoop.hdfs.server.datanode;
 
+import org.apache.hadoop.hdfs.protocol.BlockListAsLongs;
 import java.io.IOException;
 import java.util.ArrayList;
 
@@ -29,6 +30,7 @@ import org.apache.hadoop.hdfs.*;
 import org.apache.hadoop.hdfs.protocol.*;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
 import org.apache.hadoop.hdfs.server.protocol.BlockReport;
+import org.apache.hadoop.hdfs.server.protocol.BlockReportContext;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
 import org.apache.hadoop.hdfs.server.protocol.StorageBlockReport;
@@ -110,15 +112,15 @@ public class TestBlockHasMultipleReplicasOnSameDN {
     StorageBlockReport reports[] =
         new StorageBlockReport[cluster.getStoragesPerDatanode()];
 
-    ArrayList<Block> blocks = new ArrayList<Block>();
-    LogFactory.getLog("foooo").debug("HERE (0)");
+    BlockReport.Builder builder = BlockReport.builder(1);
     for (LocatedBlock locatedBlock : locatedBlocks.getLocatedBlocks()) {
-      blocks.add(locatedBlock.getBlock().getLocalBlock());
+      Block localBlock = locatedBlock.getBlock().getLocalBlock();
+      builder.add(new FinalizedReplica(localBlock, null, null));
     }
     LogFactory.getLog("foooo").debug("HERE (1)");
 
+    BlockReport bll = builder.build();
     for (int i = 0; i < cluster.getStoragesPerDatanode(); ++i) {
-      BlockReport bll = BlockReport.builder(1).addAllAsFinalized(blocks).build();
       FsVolumeSpi v = dn.getFSDataset().getVolumes().get(i);
       DatanodeStorage dns = new DatanodeStorage(v.getStorageID());
       reports[i] = new StorageBlockReport(dns, bll);
@@ -127,8 +129,8 @@ public class TestBlockHasMultipleReplicasOnSameDN {
     LogFactory.getLog("foooo").debug("HERE (1b)");
 
     // Should not assert!
-    cluster.getNameNodeRpc().blockReport(dnReg, bpid, reports);
-    LogFactory.getLog("foooo").debug("HERE (2)");
+    cluster.getNameNodeRpc().blockReport(dnReg, bpid, reports,
+        new BlockReportContext(1, 0, System.nanoTime()));
 
     // Get the block locations once again.
     locatedBlocks = client.getLocatedBlocks(filename, 0, BLOCK_SIZE * NUM_BLOCKS);

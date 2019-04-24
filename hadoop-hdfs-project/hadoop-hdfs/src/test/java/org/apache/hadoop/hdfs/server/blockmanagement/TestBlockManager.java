@@ -27,6 +27,9 @@ import io.hops.metadata.HdfsStorageFactory;
 import io.hops.metadata.hdfs.dal.INodeDataAccess;
 import io.hops.metadata.hdfs.dal.ReplicaDataAccess;
 import io.hops.metadata.hdfs.entity.INodeIdentifier;
+import io.hops.security.GroupAlreadyExistsException;
+import io.hops.security.UserAlreadyExistsException;
+import io.hops.security.UserAlreadyInGroupException;
 import io.hops.security.UsersGroups;
 import io.hops.transaction.handler.HDFSOperationType;
 import io.hops.transaction.handler.HopsTransactionalRequestHandler;
@@ -129,7 +132,9 @@ public class TestBlockManager {
             DFS_SUBTREE_EXECUTOR_LIMIT_DEFAULT));
     fsn = Mockito.mock(FSNamesystem.class);
     Mockito.doReturn(subTreeOpsPool).when(fsn).getFSOperationsExecutor();
-    formatStorage();
+    HdfsStorageFactory.resetDALInitialized();
+    HdfsStorageFactory.setConfiguration(conf);
+    formatStorage(conf);
     bm = new BlockManager(fsn, conf);
     final String[] racks = {
         "/rackA",
@@ -149,9 +154,18 @@ public class TestBlockManager {
     DFSTestUtil.createRootFolder();
   }
 
-  private void formatStorage() throws IOException {
+  private void formatStorage(Configuration conf) throws IOException {
     HdfsStorageFactory.formatStorage();
-    UsersGroups.addUserToGroup(USER, GROUP);
+    UsersGroups.createSyncRow();
+    try {
+      UsersGroups.addUser(USER);
+    } catch (UserAlreadyExistsException e) {}
+    try {
+      UsersGroups.addGroup(GROUP);
+    } catch (GroupAlreadyExistsException e ){}
+    try {
+      UsersGroups.addUserToGroup(USER, GROUP);
+    } catch (UserAlreadyInGroupException e) {}
   }
 
   private void addNodes(Iterable<DatanodeDescriptor> nodesToAdd)
@@ -680,7 +694,10 @@ public class TestBlockManager {
   @Test
   public void testHighestPriReplSrcChosenDespiteMaxReplLimit()
       throws Exception {
-    formatStorage();
+    Configuration conf = new HdfsConfiguration();
+    HdfsStorageFactory.setConfiguration(conf);
+    HdfsStorageFactory.resetDALInitialized();
+    formatStorage(conf);
     bm.maxReplicationStreams = 0;
     bm.replicationStreamsHardLimit = 1;
 
@@ -768,12 +785,12 @@ public class TestBlockManager {
     reset(node);
 
     bm.processReport(node, new DatanodeStorage(ds.getStorageID()),
-        BlockReport.builder(numBuckets).build());
+        BlockReport.builder(numBuckets).build(), null, false);
     assertEquals(1, ds.getBlockReportCount());
     // send block report again, should NOT be processed
     reset(node);
     bm.processReport(node, new DatanodeStorage(ds.getStorageID()),
-        BlockReport.builder(numBuckets).build());
+        BlockReport.builder(numBuckets).build(), null, false);
     assertEquals(1, ds.getBlockReportCount());
 
     // re-register as if node restarted, should update existing node
@@ -784,7 +801,7 @@ public class TestBlockManager {
     // send block report, should be processed after restart
     reset(node);
     bm.processReport(node, new DatanodeStorage(ds.getStorageID()),
-        BlockReport.builder(numBuckets).build());
+        BlockReport.builder(numBuckets).build(), null, false);
     // Reinitialize as registration with empty storage list pruned
     // node.storageMap.
     ds = node.getStorageInfos()[0];
@@ -813,7 +830,7 @@ public class TestBlockManager {
     reset(node);
     doReturn(1).when(node).numBlocks();
     bm.processReport(node, new DatanodeStorage(ds.getStorageID()),
-        BlockReport.builder(numBuckets).build());
+        BlockReport.builder(numBuckets).build(), null, false);
     assertEquals(1, ds.getBlockReportCount());
   }
   
@@ -825,7 +842,7 @@ public class TestBlockManager {
   @Test
   public void testStorageWithRemainingCapacity() throws Exception {
     final Configuration conf = new HdfsConfiguration();
-    final MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf).build();
+    final MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf).format(true).build();
     FileSystem fs = FileSystem.get(conf);
     Path file1 = null;
     try {

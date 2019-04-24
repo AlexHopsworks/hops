@@ -34,12 +34,14 @@ import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.protocol.Block;
+import org.apache.hadoop.hdfs.protocol.BlockListAsLongs.BlockReportReplica;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.protocol.BlockReport;
+import org.apache.hadoop.hdfs.server.protocol.BlockReportContext;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
 import org.apache.hadoop.hdfs.server.protocol.StorageBlockReport;
@@ -155,22 +157,32 @@ public abstract class BlockReportTestBase  {
 
       // Walk the list of blocks until we find one each to corrupt the
       // generation stamp and length, if so requested.
-      for (int i = 0; i < blockList.getNumberOfBlocks(); ++i) {
+      BlockReport.Builder builder = BlockReport.builder(blockList.getBuckets().length);
+      for (BlockReportReplica block : blockList) {
         if (corruptOneBlockGs && !corruptedGs) {
-          blockList = blockList.corruptBlockGSForTesting(i, rand);
-          LOG.info("Corrupted the GS for block ID " + i);
+          long gsOld = block.getGenerationStamp();
+          long gsNew;
+          do {
+            gsNew = rand.nextInt();
+          } while (gsNew == gsOld);
+          block.setGenerationStampNoPersistance(gsNew);
+          LOG.info("Corrupted the GS for block ID " + block);
           corruptedGs = true;
         } else if (corruptOneBlockLen && !corruptedLen) {
-          blockList = blockList.corruptBlockLengthForTesting(i, rand);
-          LOG.info("Corrupted the length for block ID " + i);
+          long lenOld = block.getNumBytes();
+          long lenNew;
+          do {
+            lenNew = rand.nextInt((int)lenOld - 1);
+          } while (lenNew == lenOld);
+          block.setNumBytesNoPersistance(lenNew);
+          LOG.info("Corrupted the length for block ID " + block);
           corruptedLen = true;
-        } else {
-          break;
         }
+        builder.add(new BlockReportReplica(block));
       }
 
       reports[reportIndex++] =
-          new StorageBlockReport(dnStorage, blockList);
+          new StorageBlockReport(dnStorage, builder.build());
     }
 
     return reports;
@@ -631,9 +643,12 @@ public abstract class BlockReportTestBase  {
       DataNode dn = cluster.getDataNodes().get(0);
       DatanodeProtocolClientSideTranslatorPB spy = DataNodeTestUtils.spyOnBposToNN(dn, nn);
 
-      Mockito.doAnswer(delayer).when(spy)
-          .blockReport(Mockito.<DatanodeRegistration>anyObject(),
-              Mockito.anyString(), Mockito.<StorageBlockReport[]>anyObject());
+      Mockito.doAnswer(delayer)
+        .when(spy).blockReport(
+          Mockito.<DatanodeRegistration>anyObject(),
+          Mockito.anyString(),
+          Mockito.<StorageBlockReport[]>anyObject(),
+          Mockito.<BlockReportContext>anyObject());
 
       // Force a block report to be generated. The block report will have
       // an RBW replica in it. Wait for the RPC to be sent, but block
@@ -882,7 +897,7 @@ public abstract class BlockReportTestBase  {
     }
   }
 
-   @Test
+  @Test
   public void blockReportRegrssion() throws IOException {
     final String METHOD_NAME = GenericTestUtils.getMethodName();
 
@@ -907,11 +922,16 @@ public abstract class BlockReportTestBase  {
     DataNode dn = cluster.getDataNodes().get(DN_N0);
     String poolId = cluster.getNamesystem().getBlockPoolId();
     DatanodeRegistration dnR = dn.getDNRegistrationForBP(poolId);
+    BlockReport.Builder builder = BlockReport.builder(NUM_BUCKETS);
+    for(Block b: blocks){
+      builder.add(new FinalizedReplica(b, null, null));
+    }
+    
     StorageBlockReport[] report =
         {new StorageBlockReport(new DatanodeStorage(dnR.getDatanodeUuid()),
-            BlockReport.builder(NUM_BUCKETS).addAllAsFinalized(blocks).build())};
+            builder.build())};
     try{
-    cluster.getNameNodeRpc().blockReport(dnR, poolId, report);
+    cluster.getNameNodeRpc().blockReport(dnR, poolId, report, null);
     }catch(Exception e){
       fail("No exception was expected. Get "+e);
     }

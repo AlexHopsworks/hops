@@ -271,8 +271,9 @@ public class FsVolumeImpl implements FsVolumeSpi {
       }
     }
   }
-  
-  long getDfsUsed() throws IOException {
+
+  @VisibleForTesting
+  public long getDfsUsed() throws IOException {
     long dfsUsed = 0;
     synchronized (dataset) {
       for (BlockPoolSlice s : bpSlices.values()) {
@@ -414,7 +415,8 @@ public class FsVolumeImpl implements FsVolumeSpi {
 
     @Override
     public boolean accept(File dir, String name) {
-      return !name.endsWith(".meta") && name.startsWith("blk_");
+      return !name.endsWith(".meta") &&
+              name.startsWith(Block.BLOCK_FILE_PREFIX);
     }
   }
 

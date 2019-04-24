@@ -487,8 +487,9 @@ public class TestDFSClientRetries {
       LocatedBlock goodLocatedBlock = goodBlockList.get(0);
       LocatedBlock badLocatedBlock =
           new LocatedBlock(goodLocatedBlock.getBlock(), new DatanodeInfo[]{
-              DFSTestUtil.getDatanodeInfo("1.2.3.4", "bogus", 1234)},
-              goodLocatedBlock.getStartOffset(), false);
+              DFSTestUtil.getDatanodeInfo("1.2.3.4", "bogus", 1234)
+              });
+      badLocatedBlock.setStartOffset(goodLocatedBlock.getStartOffset());
 
 
       List<LocatedBlock> badBlocks = new ArrayList<>();
@@ -1161,5 +1162,27 @@ public class TestDFSClientRetries {
         cluster.shutdown();
       }
     }
+  }
+
+  @Test
+  public void testDFSClientConfigurationLocateFollowingBlockInitialDelay()
+      throws Exception {
+    // test if DFS_CLIENT_BLOCK_WRITE_LOCATEFOLLOWINGBLOCK_INITIAL_DELAY_KEY
+    // is not configured, verify DFSClient uses the default value 400.
+    Configuration dfsConf = new HdfsConfiguration();
+    MiniDFSCluster cluster = new MiniDFSCluster.Builder(dfsConf).build();
+    cluster.waitActive();
+    NamenodeProtocols nn = cluster.getNameNodeRpc();
+    DFSClient client = new DFSClient(null, nn, dfsConf, null);
+    assertEquals(client.getConf().
+        getBlockWriteLocateFollowingInitialDelayMs(), 400);
+
+    // change DFS_CLIENT_BLOCK_WRITE_LOCATEFOLLOWINGBLOCK_INITIAL_DELAY_KEY,
+    // verify DFSClient uses the configured value 1000.
+    dfsConf.setInt(DFSConfigKeys.
+        DFS_CLIENT_BLOCK_WRITE_LOCATEFOLLOWINGBLOCK_INITIAL_DELAY_KEY, 1000);
+    client = new DFSClient(null, nn, dfsConf, null);
+    assertEquals(client.getConf().
+        getBlockWriteLocateFollowingInitialDelayMs(), 1000);
   }
 }

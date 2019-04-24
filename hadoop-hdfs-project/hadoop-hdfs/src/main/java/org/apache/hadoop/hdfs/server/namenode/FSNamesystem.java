@@ -1629,6 +1629,21 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       dir.checkPathAccess(pc, iip, FsAction.WRITE);
     }
     INodeFile file = INodeFile.valueOf(iip.getLastINode(), src);
+
+    // Check if the file is already being truncated with the same length
+    final BlockInfoContiguous last = file.getLastBlock();
+    if (last != null && last.getBlockUCState() == BlockUCState.UNDER_RECOVERY) {
+      final Block truncateBlock
+          = ((BlockInfoContiguousUnderConstruction)last).getTruncateBlock();
+      if (truncateBlock != null) {
+        final long truncateLength = file.computeFileSize(false, false)
+            + truncateBlock.getNumBytes();
+        if (newLength == truncateLength) {
+          return false;
+        }
+      }
+    }
+    
     // Opening an existing file for truncate. May need lease recovery.
     recoverLeaseInternal(RecoverLeaseOp.TRUNCATE_FILE,
         iip, src, clientName, clientMachine, false);
@@ -1643,8 +1658,9 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
               ", truncate size: " + newLength + ".");
     }
     // Perform INodeFile truncation.
-    boolean onBlockBoundary = dir.truncate(iip, newLength,
-        toRemoveBlocks, mtime);
+    final QuotaCounts delta = new QuotaCounts.Builder().build();
+    boolean onBlockBoundary = dir.truncate(iip, newLength, toRemoveBlocks,
+        mtime, delta);
     Block truncateBlock = null;
     if(file.isFileStoredInDB()){
       int newLengthInt = (int) newLength;  //small files should be small enough for their size to fit in an int
@@ -1655,14 +1671,18 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       file.storeFileDataInDB(newData);
       return onBlockBoundary;
     }
-    if(! onBlockBoundary) {
+    if(!onBlockBoundary) {
       // Open file for write, but don't log into edits
       long lastBlockDelta = file.computeFileSize() - newLength;
       assert lastBlockDelta > 0 : "delta is 0 only if on block bounday";
       truncateBlock = prepareFileForTruncate(iip, clientName, clientMachine,
           lastBlockDelta, null);
     }
-    file.recomputeFileSize();
+
+    // update the quota: use the preferred block size for UC block
+    dir.updateCountNoQuotaCheck(iip, iip.length() - 1, delta);
+
+    file.recomputeFileSize();  
     return onBlockBoundary;
 }
 
@@ -1692,7 +1712,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     boolean shouldCopyOnTruncate = shouldCopyOnTruncate(file, oldBlock);
     if(newBlock == null) {
       newBlock = (shouldCopyOnTruncate) ? createNewBlock(file) :
-          new Block(oldBlock.getBlockId(), oldBlock.getNumBytes(), file.getGenerationStamp()+1);
+          new Block(oldBlock.getBlockId(), oldBlock.getNumBytes(), file.nextGenerationStamp());
     }
 
     BlockInfoContiguousUnderConstruction truncatedBlockUC;
@@ -1725,15 +1745,12 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       NameNode.stateChangeLog.debug("BLOCK* prepareFileForTruncate: "
           + "Scheduling in-place block truncate to new size "
           + truncatedBlockUC.getTruncateBlock().getNumBytes()
-          + " block=" + truncatedBlockUC);
+          + " block=" + truncatedBlockUC + " recoveryID= " + newBlock.getGenerationStamp());
     }
-    if(shouldRecoverNow)
+    if (shouldRecoverNow) {
       truncatedBlockUC.initializeBlockRecovery(newBlock.getGenerationStamp(), getBlockManager().getDatanodeManager());
+    }
 
-    // update the quota: use the preferred block size for UC block
-    final long diff =
-        file.getPreferredBlockSize() - truncatedBlockUC.getNumBytes();
-    dir.updateSpaceConsumed(iip, 0, diff, file.getBlockReplication());
     return newBlock;
   }
 
@@ -2059,6 +2076,8 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   LocatedBlock prepareFileForAppend(String src, INodesInPath iip,
       String leaseHolder, String clientMachine, boolean newBlock) throws IOException {
     final INodeFile file = iip.getLastINode().asFile();
+    final QuotaCounts delta = verifyQuotaForUCBlock(file, iip);
+
     file.toUnderConstruction(leaseHolder, clientMachine);
 
     Lease lease = leaseManager.addLease(
@@ -2073,7 +2092,9 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       LocatedBlock ret = null;
       if (!newBlock) {
         ret = blockManager.convertLastBlockToUnderConstruction(file, 0);
-        if (ret != null && dir.isQuotaEnabled()) {
+        if (ret != null && delta != null && dir.isQuotaEnabled()) {
+          Preconditions.checkState(delta.getStorageSpace() >= 0,
+            "appending to a block with size larger than the preferred block size");
           // update the quota: use the preferred block size for UC block
           final long diff = file.getPreferredBlockSize() - ret.getBlockSize();
           dir.updateSpaceConsumed(iip, 0, diff, file.getBlockReplication());
@@ -2088,6 +2109,47 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       lease.updateLastTwoBlocksInLeasePath(src, file.getLastBlock(), file.getPenultimateBlock());
       return ret;
     }
+  }
+
+  /**
+   * Verify quota when using the preferred block size for UC block. This is
+   * usually used by append and truncate
+   * @throws QuotaExceededException when violating the storage quota
+   * @return expected quota usage update. null means no change or no need to
+   *         update quota usage later
+   */
+  private QuotaCounts verifyQuotaForUCBlock(INodeFile file, INodesInPath iip)
+      throws QuotaExceededException, IOException {
+    if (!isImageLoaded() || !dir.isQuotaEnabled()) {
+      // Do not check quota if editlog is still being processed
+      return null;
+    }
+    if (file.getLastBlock() != null) {
+      final QuotaCounts delta = computeQuotaDeltaForUCBlock(file);
+        FSDirectory.verifyQuota(iip, iip.length() - 1, delta, null);
+        return delta;
+    }
+    return null;
+  }
+
+  /** Compute quota change for converting a complete block to a UC block */
+  private QuotaCounts computeQuotaDeltaForUCBlock(INodeFile file) throws IOException {
+    final QuotaCounts delta = new QuotaCounts.Builder().build();
+    final BlockInfoContiguous lastBlock = file.getLastBlock();
+    if (lastBlock != null) {
+      final long diff = file.getPreferredBlockSize() - lastBlock.getNumBytes();
+      final short repl = file.getBlockReplication();
+      delta.addStorageSpace(diff * repl);
+      final BlockStoragePolicy policy = dir.getBlockStoragePolicySuite()
+          .getPolicy(file.getStoragePolicyID());
+      List<StorageType> types = policy.chooseStorageTypes(repl);
+      for (StorageType t : types) {
+        if (t.supportTypeQuota()) {
+          delta.addTypeSpace(t, diff);
+        }
+      }
+    }
+    return delta;
   }
 
   /**
@@ -2659,7 +2721,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       // doesn't match up with what we think is the last block. There are
       // four possibilities:
       // 1) This is the first block allocation of an append() pipeline
-      //    which started appending exactly at a block boundary.
+      //    which started appending exactly at or exceeding the block boundary.
       //    In this case, the client isn't passed the previous block,
       //    so it makes the allocateBlock() call with previous=null.
       //    We can distinguish this since the last block of the file
@@ -2684,8 +2746,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       BlockInfoContiguous penultimateBlock = pendingFile.getPenultimateBlock();
       if (previous == null &&
           lastBlockInFile != null &&
-          lastBlockInFile.getNumBytes() ==
-              pendingFile.getPreferredBlockSize() &&
+          lastBlockInFile.getNumBytes() >= pendingFile.getPreferredBlockSize() &&
           lastBlockInFile.isComplete()) {
         // Case 1
         if (NameNode.stateChangeLog.isDebugEnabled()) {
@@ -2820,7 +2881,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
                 src2, numAdditionalNodes, clientnode, chosen,
                 excludes, preferredBlockSize, storagePolicyID);
 
-            final LocatedBlock lb = new LocatedBlock(blk, targets);
+            final LocatedBlock lb = new LocatedBlock(blk, targets, -1, false);
             blockManager.setBlockToken(lb, AccessMode.COPY);
             return lb;
           }
@@ -3759,7 +3820,10 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
                 .add(lf.getLeaseLock(LockType.WRITE))
                 .add(lf.getLeasePathLock(LockType.READ_COMMITTED))
                 .add(lf.getBlockLock(oldBlock.getBlockId(), inodeIdentifier))
-                .add(lf.getBlockRelated(BLK.RE, BLK.CR, BLK.ER, BLK.UC, BLK.UR, BLK.PE));
+                .add(lf.getBlockRelated(BLK.RE, BLK.CR, BLK.ER, BLK.UC, BLK.UR, BLK.PE, BLK.IV));
+        if (isErasureCodingEnabled()) {
+          locks.add(lf.getIndivdualEncodingStatusLock(LockType.WRITE, inodeIdentifier.getInodeId()));
+        }
       }
 
       @Override
@@ -3788,6 +3852,8 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
             throw new IOException("Block (=" + oldBlock + ") not found");
           }
         }
+        final long oldGenerationStamp = storedBlock.getGenerationStamp();
+        final long oldNumBytes = storedBlock.getNumBytes();
         //
         // The implementation of delete operation (see @deleteInternal method)
         // first removes the file paths from namespace, and delays the removal
@@ -3848,8 +3914,6 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
           }
           iFile.recomputeFileSize();
           // find the DatanodeDescriptor objects
-          // There should be no locations in the blockManager till now because the
-          // file is underConstruction
           ArrayList<DatanodeDescriptor> trimmedTargets = new ArrayList<>(newTargets.length);
           ArrayList<String> trimmedStorages = new ArrayList<>(newTargets.length);
 
@@ -3886,6 +3950,10 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
             iFile.setLastBlock(truncatedBlock, trimmedStorageInfos);
           } else {
             iFile.setLastBlock(storedBlock, trimmedStorageInfos);
+            if (closeFile) {
+              blockManager.markBlockReplicasAsCorrupt(storedBlock,
+                  oldGenerationStamp, oldNumBytes, trimmedStorageInfos);
+            }
           }
         }
 
@@ -7959,7 +8027,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
             isParity ? 1 : status.getEncodingPolicy().getTargetReplication(),
             null, chosenStorages, excluded, block.getBlockSize(), storagePolicyID);
 
-    return new LocatedBlock(block.getBlock(), descriptors);
+    return new LocatedBlock(block.getBlock(), descriptors, -1, false);
   }
 
   private int getStripe(LocatedBlock block,
@@ -8398,21 +8466,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       return null;
     }
   }
-  
-  
-  public void addUserGroup(String userName, String groupName, boolean cacheOnly)
-      throws IOException {
-    checkSuperuserPrivilege();
-    UsersGroups.addUserGroupTx(userName, groupName, cacheOnly);
-  }
-  
-  
-  public void removeUserGroup(String userName, String groupName,
-      boolean cacheOnly) throws IOException {
-    checkSuperuserPrivilege();
-    UsersGroups.removeUserGroupTx(userName, groupName, cacheOnly);
-  }
-  
+
   public boolean isRetryCacheEnabled(){
     return isRetryCacheEnabled;
   }

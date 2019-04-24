@@ -73,9 +73,8 @@ import org.apache.hadoop.hdfs.server.namenode.Namesystem;
 import org.apache.hadoop.hdfs.server.namenode.metrics.NameNodeMetrics;
 import org.apache.hadoop.hdfs.server.protocol.BlockCommand;
 import org.apache.hadoop.hdfs.server.protocol.BlockReport;
-import org.apache.hadoop.hdfs.server.protocol.ReportedBlock;
-import org.apache.hadoop.hdfs.server.protocol.BlockReportBlockState;
 import org.apache.hadoop.hdfs.server.protocol.Bucket;
+import org.apache.hadoop.hdfs.server.protocol.BlockReportContext;
 import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations;
 import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations.BlockWithLocations;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeCommand;
@@ -113,7 +112,6 @@ import static io.hops.transaction.lock.LockFactory.BLK;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.hadoop.security.UserGroupInformation;
 
@@ -121,6 +119,7 @@ import static org.apache.hadoop.util.ExitUtil.terminate;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Sets;
+import org.apache.hadoop.hdfs.protocol.BlockListAsLongs;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -484,10 +483,10 @@ public class BlockManager {
 
     if (!isEnabled) {
       if (UserGroupInformation.isSecurityEnabled()) {
-	      LOG.error("Security is enabled but block access tokens " +
-		      "(via " + DFSConfigKeys.DFS_BLOCK_ACCESS_TOKEN_ENABLE_KEY + ") " +
-		      "aren't enabled. This may cause issues " +
-		      "when clients attempt to talk to a DataNode.");
+        LOG.error("Security is enabled but block access tokens " +
+            "(via " + DFSConfigKeys.DFS_BLOCK_ACCESS_TOKEN_ENABLE_KEY + ") " +
+            "aren't enabled. This may cause issues " +
+            "when clients attempt to talk to a DataNode.");
       }
       return null;
     }
@@ -1594,10 +1593,6 @@ public class BlockManager {
     NumberReplicas nr = countNodes(b.stored);
     if (nr.replicasOnStaleNodes() > 0) {
       blockLog.info("BLOCK* invalidateBlocks: postponing " +
-          "invalidation of " + b + " on " + dn + " because " +
-          nr.replicasOnStaleNodes() + " replica(s) are located on nodes " +
-          "with potentially out-of-date block reports");
-      blockLog.info("BLOCK* invalidateBlocks: postponing " +
           "invalidation of {} on {} because {} replica(s) are located on " +
           "nodes with potentially out-of-date block reports", b, dn,
           nr.replicasOnStaleNodes());
@@ -1725,7 +1720,7 @@ public class BlockManager {
       // abandoned block or block reopened for append
       if (bc == null || (bc.isUnderConstruction() && getBlockInfo(blk).equals(bc.getLastBlock()))) {
         // remove from neededReplications
-        neededReplications.remove(getBlockInfo(blk), priority1);
+        neededReplications.remove(getBlockInfo(blk));
         neededReplications.decrementReplicationIndex(priority1);
         return scheduledWork;
       }
@@ -1754,8 +1749,7 @@ public class BlockManager {
       if (numEffectiveReplicas >= requiredReplication) {
         if ((pendingReplications.getNumReplicas(getBlockInfo(blk)) > 0) ||
             (blockHasEnoughRacks(blk))) {
-          neededReplications.remove(getBlockInfo(blk),
-              priority1); // remove from neededReplications
+          neededReplications.remove(getBlockInfo(blk)); // remove from neededReplications
           neededReplications.decrementReplicationIndex(priority1);
           blockLog.info("BLOCK* Removing " + blk +
               " from neededReplications as it has enough replicas");
@@ -1802,8 +1796,7 @@ public class BlockManager {
         bc = blocksMap.getBlockCollection(block);
         // abandoned block or block reopened for append
         if (bc == null || (bc.isUnderConstruction() && getBlockInfo(blk).equals(bc.getLastBlock()))) {
-          neededReplications.remove(getBlockInfo(block),
-              priority); // remove from neededReplications
+          neededReplications.remove(getBlockInfo(block)); // remove from neededReplications
           rw.targets = null;
           neededReplications.decrementReplicationIndex(priority);
           continue;
@@ -1818,8 +1811,7 @@ public class BlockManager {
         if (numEffectiveReplicas >= requiredReplication) {
           if ((pendingReplications.getNumReplicas(getBlockInfo(block)) > 0) ||
               (blockHasEnoughRacks(block))) {
-            neededReplications.remove(getBlockInfo(block),
-                priority); // remove from neededReplications
+            neededReplications.remove(getBlockInfo(block)); // remove from neededReplications
             neededReplications.decrementReplicationIndex(priority);
             rw.targets = null;
             blockLog.info("BLOCK* Removing {} from neededReplications as" +
@@ -1853,8 +1845,7 @@ public class BlockManager {
 
         // remove from neededReplications
         if (numEffectiveReplicas + targets.length >= requiredReplication) {
-          neededReplications.remove(getBlockInfo(block),
-              priority); // remove from neededReplications
+          neededReplications.remove(getBlockInfo(block)); // remove from neededReplications
           neededReplications.decrementReplicationIndex(priority);
         }
       }
@@ -1876,9 +1867,8 @@ public class BlockManager {
       }
     }
     if (blockLog.isDebugEnabled()) {
-      blockLog.debug(
-          "BLOCK* neededReplications = " + neededReplications.size() +
-              " pendingReplications = " + pendingReplications.size());
+      blockLog.debug("BLOCK* neededReplications = {} pendingReplications = {}",
+          neededReplications.size(), pendingReplications.size());
     }
 
     return scheduledWork;
@@ -2172,8 +2162,9 @@ public class BlockManager {
    */
   public boolean processReport(final DatanodeID nodeID,
       final DatanodeStorage storage,
-      final BlockReport newReport) throws IOException {
-    final long startTime = Time.now(); //after acquiring write lock
+      final BlockReport newReport, BlockReportContext context,
+      boolean lastStorageInRpc) throws IOException {
+    final long startTime = Time.monotonicNow(); //after acquiring write lock
 
     DatanodeDescriptor node = datanodeManager.getDatanode(nodeID);
     if (node == null || !node.isAlive) {
@@ -2201,6 +2192,29 @@ public class BlockManager {
       reportStatistics = processReport(storageInfo, newReport);
 
       storageInfo.receivedBlockReport();
+      if (context != null) {
+        storageInfo.setLastBlockReportId(context.getReportId());
+        if (lastStorageInRpc) {
+          int rpcsSeen = node.updateBlockReportContext(context);
+          if (rpcsSeen >= context.getTotalRpcs()) {
+            List<DatanodeStorageInfo> zombies = node.removeZombieStorages();
+            if (zombies.isEmpty()) {
+              LOG.debug("processReport 0x{}: no zombie storages found.",
+                  Long.toHexString(context.getReportId()));
+            } else {
+              for (DatanodeStorageInfo zombie : zombies) {
+                removeZombieReplicas(context, zombie);
+              }
+            }
+            node.clearBlockReportContext();
+          } else {
+            LOG.debug("processReport 0x{}: {} more RPCs remaining in this " +
+                    "report.", Long.toHexString(context.getReportId()),
+                (context.getTotalRpcs() - rpcsSeen)
+            );
+          }
+        }
+      }
 
       final long endTime = Time.now();
 
@@ -2220,6 +2234,20 @@ public class BlockManager {
           getNumberOfBlocks() + ", processing time: " + (endTime - startTime) + " ms. " + reportStatistics, t);
       throw t;
     }
+  }
+
+  private void removeZombieReplicas(BlockReportContext context,
+      DatanodeStorageInfo zombie) throws IOException {
+    LOG.warn("processReport 0x{}: removing zombie storage {}, which no " +
+             "longer exists on the DataNode.",
+              Long.toHexString(context.getReportId()), zombie.getStorageID());
+    int prevBlocks = zombie.numBlocks();
+    removeBlocksAssociatedTo(zombie);
+    assert(zombie.numBlocks() == 0);
+    LOG.warn("processReport 0x{}: removed {} replicas from storage {}, " +
+            "which no longer exists on the DataNode.",
+            Long.toHexString(context.getReportId()), prevBlocks,
+            zombie.getStorageID());
   }
 
   /**
@@ -2323,6 +2351,45 @@ public class BlockManager {
     }
   }
 
+    /**
+   * Mark block replicas as corrupt except those on the storages in 
+   * newStorages list.
+   */
+  public void markBlockReplicasAsCorrupt(BlockInfoContiguous block, 
+      long oldGenerationStamp, long oldNumBytes, 
+      DatanodeStorageInfo[] newStorages) throws IOException {
+    BlockToMarkCorrupt b = null;
+    if (block.getGenerationStamp() != oldGenerationStamp) {
+      b = new BlockToMarkCorrupt(block, oldGenerationStamp,
+          "genstamp does not match " + oldGenerationStamp
+          + " : " + block.getGenerationStamp(), Reason.GENSTAMP_MISMATCH);
+    } else if (block.getNumBytes() != oldNumBytes) {
+      b = new BlockToMarkCorrupt(block,
+          "length does not match " + oldNumBytes
+          + " : " + block.getNumBytes(), Reason.SIZE_MISMATCH);
+    } else {
+      return;
+    }
+
+    for (DatanodeStorageInfo storage : getStorages(block)) {
+      boolean isCorrupt = true;
+      if (newStorages != null) {
+        for (DatanodeStorageInfo newStorage : newStorages) {
+          if (newStorage!= null && storage.equals(newStorage)) {
+            isCorrupt = false;
+            break;
+          }
+        }
+      }
+      if (isCorrupt) {
+        blockLog.info("BLOCK* markBlockReplicasAsCorrupt: mark block replica" +
+            " {} on {} as corrupt because the dn is not in the new committed " +
+            "storage list.", b, storage.getDatanodeDescriptor());
+        markBlockAsCorrupt(b, storage, storage.getDatanodeDescriptor());
+      }
+    }
+  }
+  
   @VisibleForTesting
   public ReportStatistics processReport(final DatanodeStorageInfo storage,final BlockReport report) throws
       IOException {
@@ -2611,7 +2678,7 @@ public class BlockManager {
     final Collection<Callable<Void>> subTasks = new ArrayList<>();
     for (final int bucketId : matchingResult.mismatchedBuckets) {
       final Bucket bucket = newReport.getBuckets()[bucketId];
-      final List<ReportedBlock> bucketBlocks = Arrays.asList(bucket.getBlocks());
+      final BlockListAsLongs bucketBlocks =bucket.getBlocks();
       final Callable<Void> subTask = new Callable<Void>() {
         @Override
         public Void call() throws IOException {
@@ -2651,18 +2718,18 @@ public class BlockManager {
                                                                 final Map<Long, Long> mismatchedBlocksAndInodes,
                                                                 final Set<Long> aggregatedSafeBlocks,
                                                                 final Map<Long,Long> invalidatedReplicas,
-                                                                final List<ReportedBlock> reportedBlocks ) {
+                                                                final BlockListAsLongs reportedBlocks ) {
 
     return new HopsTransactionalRequestHandler(HDFSOperationType.PROCESS_REPORT) {
       @Override
       public void acquireLock(TransactionLocks locks) throws IOException {
         LockFactory lf = LockFactory.getInstance();
-        if (!reportedBlocks.isEmpty()) {
+        if (reportedBlocks.getNumberOfBlocks()!=0) {
           List<Long> resolvedBlockIds = new ArrayList<>();
           List<Long> inodeIds = new ArrayList<>();
           List<Long> unResolvedBlockIds = new ArrayList<>();
 
-          for (ReportedBlock reportedBlock : reportedBlocks) {
+          for (BlockListAsLongs.BlockReportReplica reportedBlock : reportedBlocks) {
             Long inodeId = mismatchedBlocksAndInodes.get(reportedBlock.getBlockId());
             if (inodeId != null) {
               resolvedBlockIds.add(reportedBlock.getBlockId());
@@ -2684,13 +2751,13 @@ public class BlockManager {
         // scan the report and process newly reported blocks
         byte[] hash = HashBuckets.initalizeHash(); // Our updated hash should only consider
         // finalized, stored blocks
-        for (ReportedBlock brb : reportedBlocks) {
+        for (BlockListAsLongs.BlockReportReplica brb : reportedBlocks) {
           Block block = new Block();
-          block.setNoPersistance(brb.getBlockId(), brb.getLength(),
+          block.setNoPersistance(brb.getBlockId(), brb.getBytesOnDisk(),
                   brb.getGenerationStamp());
           BlockInfoContiguous storedBlock =
                   processReportedBlock(storage,
-                          block, fromBlockReportBlockState(brb.getState()),
+                          block, brb.getState(),
                           toAdd,
                           toInvalidate,
                           toCorrupt, toUC, aggregatedSafeBlocks,
@@ -2699,7 +2766,7 @@ public class BlockManager {
                           invalidatedReplicas);
           if (storedBlock != null) {
             mismatchedBlocksAndInodes.remove(storedBlock.getBlockId());
-            if (brb.getState() == BlockReportBlockState.FINALIZED){
+            if (brb.getState() == ReplicaState.FINALIZED){
               // Only update hash with blocks that should not
               // be removed and are finalized. This helps catch excess
               // replicas as well.
@@ -2717,22 +2784,6 @@ public class BlockManager {
     };
   }
   
-  private ReplicaState fromBlockReportBlockState(
-      BlockReportBlockState
-          state) {
-    switch (state){
-      case FINALIZED:
-        return ReplicaState.FINALIZED;
-      case RBW:
-        return ReplicaState.RBW;
-      case RWR:
-        return ReplicaState.RWR;
-      default:
-        throw new RuntimeException("Block Report should only contain FINALIZED, RBW " +
-            "and RWR replicas. Got: " + state);
-    }
-  }
-
   private HashMatchingResult calculateMismatchedHashes(DatanodeStorageInfo storage,
       BlockReport report, Boolean firstBlockReport) throws IOException {
     List<HashBucket> storedHashes = HashBuckets.getInstance().getBucketsForStorage(storage);
@@ -2757,7 +2808,7 @@ public class BlockManager {
       if (firstBlockReport) {
         //if the bucket is empty there is nothing to process 
         //except if the namenode think that there should be things in the bucket
-        if (report.getBuckets()[i].getBlocks().length == 0
+        if (report.getBuckets()[i].getBlocks().getNumberOfBlocks() == 0
                 && HashBuckets.hashEquals(storedHash, HashBuckets.initalizeHash())) {
           matchedBuckets.add(i);
           continue;
@@ -3163,9 +3214,8 @@ public class BlockManager {
       }
     } else if (result == AddBlockResult.REPLACED) {
       curReplicaDelta = 0;
-      blockLog.warn("BLOCK* addStoredBlock: " + "block " + storedBlock
-          + " moved to storageType " + storageInfo.getStorageType()
-          + " on storage " + storageInfo.getStorageID());
+      blockLog.warn("BLOCK* addStoredBlock: block {} moved to storageType " +
+          "{} on storage {}", storedBlock, storageInfo.getStorageType(), storageInfo.getStorageID());
     } else {
       // if the same block is added again and the replica was corrupt
       // previously because of a wrong gen stamp, remove it from the
@@ -4457,29 +4507,7 @@ public class BlockManager {
     }
     return live;
   }
-
-  private void logBlockReplicationInfo(Block block, DatanodeDescriptor srcNode,
-      NumberReplicas num) throws StorageException, TransactionContextException {
-    int curReplicas = num.liveReplicas();
-    int curExpectedReplicas = getReplication(block);
-    BlockCollection bc = blocksMap.getBlockCollection(block);
-    List<DatanodeStorageInfo> storages = blocksMap.storageList(block);
-    StringBuilder nodeList = new StringBuilder();
-    for (DatanodeStorageInfo storage : storages){
-      final DatanodeDescriptor node = storage.getDatanodeDescriptor();
-      nodeList.append(node);
-      nodeList.append(" ");
-    }
-    LOG.info("Block: " + block + ", Expected Replicas: " + curExpectedReplicas +
-        ", live replicas: " + curReplicas + ", corrupt replicas: " +
-        num.corruptReplicas() + ", decommissioned replicas: " +
-        num.decommissionedReplicas() + ", excess replicas: " +
-        num.excessReplicas() + ", Is Open File: " + bc.isUnderConstruction() +
-        ", Datanodes having this block: " + nodeList + ", Current Datanode: " +
-        srcNode + ", Is current datanode decommissioning: " +
-        srcNode.isDecommissionInProgress());
-  }
-
+  
   /**
    * On stopping decommission, check if the node has excess replicas.
    * If there are any excess replicas, call processOverReplicatedBlock().
@@ -4566,139 +4594,30 @@ public class BlockManager {
   }
 
   /**
-   * Return true if there are any blocks on this node that have not
-   * yet reached their replication factor. Otherwise returns false.
+   * Returns whether a node can be safely decommissioned based on its 
+   * liveness. Dead nodes cannot always be safely decommissioned.
    */
-  boolean isReplicationInProgress(final DatanodeDescriptor srcNode)
-      throws IOException {
-    final AtomicBoolean status = new AtomicBoolean(false);
-    final AtomicBoolean firstReplicationLog = new AtomicBoolean(true);
-    final AtomicInteger underReplicatedBlocks = new AtomicInteger(0);
-    final AtomicInteger decommissionOnlyReplicas = new AtomicInteger(0);
-    final AtomicInteger underReplicatedInOpenFiles = new AtomicInteger(0);
-
-    Map<Long, Long> blocksOnNode = srcNode.getAllStorageReplicas(numBuckets, blockFetcherNBThreads,
-        blockFetcherBucketsPerThread, ((FSNamesystem) namesystem).getFSOperationsExecutor());
-
-     final Map<Long, List<Long>> inodeIdsToBlockMap = new HashMap<>();
-    for (Map.Entry<Long, Long> entry : blocksOnNode.entrySet()) {
-      List<Long> list = inodeIdsToBlockMap.get(entry.getValue());
-      if (list == null) {
-        list = new ArrayList<>();
-        inodeIdsToBlockMap.put(entry.getValue(), list);
-      }
-      list.add(entry.getKey());
+  boolean isNodeHealthyForDecommission(DatanodeDescriptor node) throws IOException {
+    if (node.isAlive) {
+      return true;
     }
 
-    final List<Long> inodeIds = new ArrayList<>(inodeIdsToBlockMap.keySet());
-
-    try {
-      Slicer.slice(inodeIds.size(), removalBatchSize, removalNoThreads,
-          ((FSNamesystem) namesystem).getFSOperationsExecutor(),
-          new Slicer.OperationHandler() {
-        @Override
-        public void handle(int startIndex, int endIndex)
-            throws Exception {
-          final List<Long> ids = inodeIds.subList(startIndex, endIndex);
-          HopsTransactionalRequestHandler checkReplicationHandler = new HopsTransactionalRequestHandler(
-              HDFSOperationType.CHECK_REPLICATION_IN_PROGRESS) {
-            List<INodeIdentifier> inodeIdentifiers;
-
-            @Override
-            public void setUp() throws StorageException {
-              inodeIdentifiers = INodeUtil.resolveINodesFromIds(ids);
-
-            }
-
-            @Override
-            public void acquireLock(TransactionLocks locks) throws IOException {
-              LockFactory lf = LockFactory.getInstance();
-              locks.add(
-                  lf.getBatchedINodesLock(inodeIdentifiers))
-                  .add(lf.getSqlBatchedBlocksLock()).add(
-                  lf.getSqlBatchedBlocksRelated(BLK.RE, BLK.ER, BLK.CR, BLK.UR, BLK.PE));
-            }
-
-            @Override
-            public Object performTask() throws IOException {
-              for (INodeIdentifier identifier : inodeIdentifiers) {
-                for (long blockId : inodeIdsToBlockMap.get(identifier.getInodeId())) {
-                  BlockInfoContiguous block = EntityManager.find(BlockInfoContiguous.Finder.ByBlockIdAndINodeId, blockId);
-                  BlockCollection bc = blocksMap.getBlockCollection(block);
-
-                  if (bc != null) {
-                    NumberReplicas num = countNodes(block);
-                    int curReplicas = num.liveReplicas();
-                    int curExpectedReplicas = getReplication(block);
-                    if (isNeededReplication(block, curExpectedReplicas,
-                        curReplicas)) {
-                      if (curExpectedReplicas > curReplicas) {
-                        if (bc.isUnderConstruction()) {
-                          if (block.equals(bc.getLastBlock()) && curReplicas > minReplication) {
-                            continue;
-                          }
-                          underReplicatedInOpenFiles.incrementAndGet();
-                        }
-
-                        //Log info about one block for this node which needs replication
-                        if (!status.get()) {
-                          if (firstReplicationLog.getAndSet(false)) {
-                            logBlockReplicationInfo(block, srcNode, num);
-                          }
-                        }
-                        // Allowing decommission as long as default replication is met
-                        if (curReplicas < defaultReplication) {
-                          status.set(true);
-                        }
-
-
-                        underReplicatedBlocks.incrementAndGet();
-                        if ((curReplicas == 0) && (num.decommissionedReplicas() > 0)) {
-                          decommissionOnlyReplicas.incrementAndGet();
-                        }
-                      }
-                      if (!neededReplications.contains(getBlockInfo(block)) && pendingReplications.getNumReplicas(
-                          getBlockInfo(block)) == 0 && namesystem.isPopulatingReplQueues()) {
-                        //
-                        // These blocks have been reported from the datanode
-                        // after the startDecommission method has been executed. These
-                        // blocks were in flight when the decommissioning was started.
-                        // Process these blocks only when active NN is out of safe mode.
-                        //
-                        neededReplications.add(getBlockInfo(block), curReplicas,
-                            num.decommissionedReplicas(), curExpectedReplicas);
-                      }
-                    }
-                  }
-                }
-              }
-              if (!status.get() && !srcNode.isAlive) {
-                updateState();
-                if (pendingReplicationBlocksCount == 0 &&
-                  underReplicatedBlocksCount == 0) {
-                  LOG.info("srcNode {} is dead and there are no under-replicated" +
-                      " blocks or blocks pending replication. Marking as " +
-                      "decommissioned.");
-                } else {
-                  LOG.warn("srcNode " + srcNode + " is dead " +
-                      "while decommission is in progress. Continuing to mark " +
-                      "it as decommission in progress so when it rejoins the " +
-                      "cluster it can continue the decommission process.");
-                  status.set(true);
-                }
-              }
-              return null;
-            }
-          };
-          checkReplicationHandler.handle(namesystem);
-        }
-      });
-    } catch (Exception ex) {
-      throw new IOException(ex);
+    updateState();
+    if (pendingReplicationBlocksCount == 0 &&
+        underReplicatedBlocksCount == 0) {
+      LOG.info("Node {} is dead and there are no under-replicated" +
+          " blocks or blocks pending replication. Safe to decommission.", 
+          node);
+      return true;
     }
-    srcNode.decommissioningStatus
-        .set(underReplicatedBlocks.get(), decommissionOnlyReplicas.get(), underReplicatedInOpenFiles.get());
-    return status.get();
+
+    LOG.warn("Node {} is dead " +
+        "while decommission is in progress. Cannot be safely " +
+        "decommissioned since there is risk of reduced " +
+        "data durability or data loss. Either restart the failed node or" +
+        " force decommissioning by removing, calling refreshNodes, " +
+        "then re-adding to the excludes files.", node);
+    return false;
   }
 
   public int getActiveBlockCount() throws IOException {
@@ -4722,7 +4641,7 @@ public class BlockManager {
     blocksMap.removeBlock(block);
     // Remove the block from pendingReplications and neededReplications
     pendingReplications.remove(storedBlock);
-    neededReplications.remove(storedBlock, UnderReplicatedBlocks.LEVEL);
+    neededReplications.remove(storedBlock);
     if (postponedMisreplicatedBlocks.remove(block)) {
       postponedMisreplicatedBlocksCount.decrementAndGet();
     }
@@ -4865,8 +4784,7 @@ public class BlockManager {
    * A block needs replication if the number of replicas is less than expected
    * or if it does not have enough racks.
    */
-  private boolean isNeededReplication(Block b, int expected, int current)
-      throws StorageException, TransactionContextException {
+  boolean isNeededReplication(Block b, int expected, int current) throws StorageException, TransactionContextException {
     return current < expected || !blockHasEnoughRacks(b);
   }
 
@@ -5176,7 +5094,7 @@ public class BlockManager {
         return null;
       }
     }.handle(namesystem);
-    LOG.info("removed " + removedBlocks.get() + " replicas from " + node.getName());
+    LOG.debug("removed " + removedBlocks.get() + " replicas from " + node.getName());
   }
   
   private void removeStoredBlocksTx(final List<Long> inodeIds,
@@ -5527,4 +5445,25 @@ public class BlockManager {
     }
     stopReplicationInitializer();
   }
+  
+  public int getNumBuckets() {
+    return numBuckets;
+  }
+
+  public int getBlockFetcherNBThreads() {
+    return blockFetcherNBThreads;
+  }
+
+  public int getBlockFetcherBucketsPerThread() {
+    return blockFetcherBucketsPerThread;
+  }
+
+  public int getRemovalBatchSize() {
+    return removalBatchSize;
+  }
+
+  public int getRemovalNoThreads() {
+    return removalNoThreads;
+  }
+  
 }

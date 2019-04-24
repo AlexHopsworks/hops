@@ -99,6 +99,7 @@ public class TestFileTruncate {
   @BeforeClass
   public static void startUp() throws IOException {
     conf = new HdfsConfiguration();
+    conf.setLong(DFSConfigKeys.DFS_NUM_BUCKETS_KEY, 1);
     conf.setLong(DFSConfigKeys.DFS_NAMENODE_MIN_BLOCK_SIZE_KEY, BLOCK_SIZE);
     conf.setInt(DFSConfigKeys.DFS_BYTES_PER_CHECKSUM_KEY, BLOCK_SIZE);
     conf.setInt(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY, SHORT_HEARTBEAT);
@@ -174,6 +175,8 @@ public class TestFileTruncate {
       LOG.info("newLength=" + newLength + ", isReady=" + isReady);
       assertEquals("File must be closed for truncating at the block boundary",
           isReady, newLength % BLOCK_SIZE == 0);
+      assertEquals("Truncate is not idempotent",
+          isReady, fs.truncate(p, newLength));
       if (!isReady) {
         checkBlockRecovery(p);
       }
@@ -374,27 +377,22 @@ public class TestFileTruncate {
       boolean isReady = fs.truncate(p, newLength);
       assertFalse(isReady);
     } finally {
-      cluster.restartDataNode(dn);
+      cluster.restartDataNode(dn, true, true);
       cluster.waitActive();
-      cluster.triggerBlockReports();
     }
+    checkBlockRecovery(p);
 
     LocatedBlock newBlock = getLocatedBlocks(p).getLastLocatedBlock();
     /*
      * For non copy-on-truncate, the truncated block id is the same, but the 
      * GS should increase.
-     * We trigger block report for dn0 after it restarts, since the GS 
-     * of replica for the last block on it is old, so the reported last block
-     * from dn0 should be marked corrupt on nn and the replicas of last block 
-     * on nn should decrease 1, then the truncated block will be replicated 
-     * to dn0.
+     * The truncated block will be replicated to dn0 after it restarts.
      */
     assertEquals(newBlock.getBlock().getBlockId(), 
         oldBlock.getBlock().getBlockId());
     assertEquals(newBlock.getBlock().getGenerationStamp(),
         oldBlock.getBlock().getGenerationStamp() + 1);
 
-    checkBlockRecovery(p);
     // Wait replicas come to 3
     DFSTestUtil.waitReplication(fs, p, REPLICATION);
     // Old replica is disregarded and replaced with the truncated one
@@ -433,10 +431,10 @@ public class TestFileTruncate {
     boolean isReady = fs.truncate(p, newLength);
     assertFalse(isReady);
 
-    cluster.restartDataNode(dn0);
-    cluster.restartDataNode(dn1);
+    cluster.restartDataNode(dn0, true, true);
+    cluster.restartDataNode(dn1, true, true);
     cluster.waitActive();
-    cluster.triggerBlockReports();
+    checkBlockRecovery(p);
 
     LocatedBlock newBlock = getLocatedBlocks(p).getLastLocatedBlock();
     /*
@@ -448,7 +446,6 @@ public class TestFileTruncate {
     assertEquals(newBlock.getBlock().getGenerationStamp(),
         oldBlock.getBlock().getGenerationStamp() + 1);
 
-    checkBlockRecovery(p);
     // Wait replicas come to 3
     DFSTestUtil.waitReplication(fs, p, REPLICATION);
     // Old replica is disregarded and replaced with the truncated one on dn0
@@ -492,6 +489,7 @@ public class TestFileTruncate {
     assertFalse(isReady);
 
     cluster.shutdownDataNodes();
+    cluster.setDataNodesDead();
     try {
       for(int i = 0; i < SUCCESS_ATTEMPTS && cluster.isDataNodeUp(); i++) {
         Thread.sleep(SLEEP);
@@ -504,6 +502,7 @@ public class TestFileTruncate {
           StartupOption.REGULAR, null);
       cluster.waitActive();
     }
+    checkBlockRecovery(p);
 
     fs.delete(parent, true);
   }

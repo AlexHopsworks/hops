@@ -18,8 +18,6 @@
 
 package org.apache.hadoop.hdfs.protocolPB;
 
-import com.google.protobuf.RpcController;
-import com.google.protobuf.ServiceException;
 import io.hops.leader_election.node.ActiveNode;
 import io.hops.leader_election.node.SortedActiveNodeList;
 import io.hops.leader_election.proto.ActiveNodeProtos;
@@ -62,9 +60,10 @@ import org.apache.hadoop.hdfs.server.protocol.VolumeFailureSummary;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import org.apache.hadoop.hdfs.protocol.RollingUpgradeStatus;
+import com.google.protobuf.RpcController;
+import com.google.protobuf.ServiceException;
 
 public class DatanodeProtocolServerSideTranslatorPB
     implements DatanodeProtocolPB {
@@ -146,7 +145,7 @@ public class DatanodeProtocolServerSideTranslatorPB
     DatanodeCommand cmd = null;
     StorageBlockReport[] storageBlockReports =
         new StorageBlockReport[request.getReportsCount()];
-
+ 
     int index = 0;
     for (StorageBlockReportProto s : request.getReportsList()) {
       DatanodeProtocolProtos.BlockReportProto report = s.getReport();
@@ -156,7 +155,9 @@ public class DatanodeProtocolServerSideTranslatorPB
     }
     try {
       cmd = impl.blockReport(PBHelper.convert(request.getRegistration()),
-          request.getBlockPoolId(), storageBlockReports);
+          request.getBlockPoolId(), storageBlockReports,
+          request.hasContext() ?
+              PBHelper.convert(request.getContext()) : null);
     } catch (IOException e) {
       throw new ServiceException(e);
     }
