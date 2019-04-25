@@ -45,11 +45,17 @@ public class FileProvenanceContext extends BaseEntityContext<FileProvenanceConte
     private final long inodeId;
     private final int userId;
     private final String appId;
+    private final long timestamp;
+    private final long logicalTime;
+    private final String operation;
 
-    public CacheKey(long inodeId, int userId, String appId) {
+    public CacheKey(long inodeId, int userId, String appId, long timestamp, long logicalTime, String operation) {
       this.inodeId = inodeId;
       this.userId = userId;
       this.appId = appId;
+      this.timestamp = timestamp;
+      this.logicalTime = logicalTime;
+      this.operation = operation;
     }
 
     @Override
@@ -92,16 +98,19 @@ public class FileProvenanceContext extends BaseEntityContext<FileProvenanceConte
     private final int userId;
     private final String appId;
     private final long timestamp;
-
-    public DBKey(long inodeId, int userId, String appId, long timestamp) {
+    private final long logicalTime;
+    private final String operation;
+    public DBKey(long inodeId, int userId, String appId, long timestamp, long logicalTime, String operation) {
       this.inodeId = inodeId;
       this.userId = userId;
       this.appId = appId;
       this.timestamp = timestamp;
+      this.logicalTime = logicalTime;
+      this.operation = operation;
     }
 
     private CacheKey getCacheKey() {
-      return new CacheKey(inodeId, userId, appId);
+      return new CacheKey(inodeId, userId, appId, timestamp, logicalTime, operation);
     }
 
     @Override
@@ -165,7 +174,7 @@ public class FileProvenanceContext extends BaseEntityContext<FileProvenanceConte
   @Override
   DBKey getKey(FileProvenanceEntry logEntry) {
     return new DBKey(logEntry.getInodeId(), logEntry.getUserId(),
-      logEntry.getAppId(), logEntry.getLogicalTime());
+      logEntry.getAppId(), logEntry.getTimestamp(), logEntry.getLogicalTime(), logEntry.getOperation());
   }
 
   @Override
