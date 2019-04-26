@@ -111,22 +111,26 @@ public class TestFSProvenance {
   }
 
   private Path createDirStructure(DistributedFileSystem dfs) throws IOException {
-    Path projects = new Path("/projects");
+    Path projects = new Path("/Projects");
+    dfs.mkdir(projects, FsPermission.getDefault());
     Path project = new Path(projects, "project");
+    dfs.mkdir(project, FsPermission.getDefault());
     final Path dataset = new Path(project, "dataset");
-    final Path subdir = new Path(dataset, "subdir");
-    dfs.mkdirs(dataset, FsPermission.getDefault());
+    dfs.mkdir(dataset, FsPermission.getDefault());
     DFSClient dfsClient = dfs.getClient();
     dfsClient.setMetaEnabled(dataset.toString(), true);
-    dfs.mkdirs(subdir, FsPermission.getDefault());
+    final Path subdir = new Path(dataset, "subdir");
+    dfs.mkdir(subdir, FsPermission.getDefault());
     return subdir;
   }
 
   private void cleanDirStructure(DistributedFileSystem dfs) throws IOException {
-    Path projects = new Path("/projects");
+    Path projects = new Path("/Projects");
     Path project = new Path(projects, "project");
     final Path dataset = new Path(project, "dataset");
     final Path subdir = new Path(dataset, "subdir");
     dfs.delete(subdir, true);
+    dfs.delete(dataset, true);
+    dfs.delete(project, true);
   }
 }

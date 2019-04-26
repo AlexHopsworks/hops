@@ -31,6 +31,8 @@ import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.apache.hadoop.hdfs.DFSUtil;
 
 import java.io.IOException;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
 import org.apache.hadoop.security.UserGroupInformation;
 
@@ -342,9 +344,9 @@ public abstract class INodeWithAdditionalFields extends INode {
     INodeDirectory datasetINode = null;
     String path = null;
     try {
-      if(isProject()) {
+      if((this instanceof INodeDirectory) && isProject((INodeDirectory)this)) {
         projectINode = (INodeDirectory) this;
-      } else if (isDataset()) {
+      } else if ((this instanceof INodeDirectory) && isDataset((INodeDirectory)this)) {
         datasetINode = (INodeDirectory) this;
         projectINode = datasetINode.getParent();
       } else {
@@ -364,7 +366,7 @@ public abstract class INodeWithAdditionalFields extends INode {
     } catch (IOException ex) {
       throw new RuntimeException("provenance log error3", ex);
     }
-    long timestamp = getAccessTime();
+    long timestamp = System.currentTimeMillis();
     String inodeName = getLocalName();
     long projectId = projectINode.getId();
     long datasetId = datasetINode == null ? 0l : datasetINode.getId();
@@ -379,18 +381,30 @@ public abstract class INodeWithAdditionalFields extends INode {
     }
   }
   
-  private boolean isDataset() {
-    return this instanceof INodeDirectory && ((INodeDirectory) this).isMetaEnabled();
-  }
-  
-  private boolean isProject() {
+  private boolean isDataset(INodeDirectory inode) {
     try {
-      INodeDirectory projects = (INodeDirectory)INodeDirectory.getRootDir().getChild("Projects");
-      return this.getParent().equals(projects);
-    } catch (StorageException | TransactionContextException  ex) {
+      if (inode.getParent() != null) {
+        return isProject(inode.getParent());
+      } else {
+        return false;
+      }
+    } catch (StorageException | TransactionContextException ex) {
       return false;
     }
-  } 
+  }
+  
+  private boolean isProject(INodeDirectory inode) {
+    try {
+      if (inode.getParent() != null) {
+        INodeDirectory projects = (INodeDirectory) INodeDirectory.getRootDir().getChild("Projects");
+        return inode.getParent().equals(projects);
+      } else {
+        return false;
+      }
+    } catch (StorageException | TransactionContextException ex) {
+      return false;
+    }
+  }
   
   public final int getLogicalTime() {
     return logicalTime;
