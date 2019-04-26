@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<actions>
+        <action>
+            <actionName>build-with-dependencies</actionName>
+            <reactor>also-make</reactor>
+            <packagings>
+                <packaging>*</packaging>
+            </packagings>
+            <goals>
+                <goal>install</goal>
+                <goal>generate-sources</goal>
+            </goals>
+            <properties>
+                <skipTests>true</skipTests>
+                <Env.PATH>/usr/local/opt/protobuf@2.5/bin:/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</Env.PATH>
+                <Env.LD_LIBRARY_PATH>/usr/local/lib</Env.LD_LIBRARY_PATH>
+            </properties>
+            <activatedProfiles>
+                <activatedProfile>ndb</activatedProfile>
+                <activatedProfile>os.mac</activatedProfile>
+            </activatedProfiles>
+        </action>
+    </actions>
