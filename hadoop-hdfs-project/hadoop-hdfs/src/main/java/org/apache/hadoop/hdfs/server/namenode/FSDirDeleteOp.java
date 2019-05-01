@@ -20,7 +20,7 @@ package org.apache.hadoop.hdfs.server.namenode;
 import io.hops.exception.StorageException;
 import io.hops.exception.TransactionContextException;
 import io.hops.metadata.hdfs.entity.INodeIdentifier;
-import io.hops.metadata.hdfs.entity.MetadataLogEntry;
+import io.hops.metadata.hdfs.entity.INodeMetadataLogEntry;
 import io.hops.metadata.hdfs.entity.ProjectedINode;
 import io.hops.metadata.hdfs.entity.FileProvenanceEntry;
 import io.hops.metadata.hdfs.entity.SubTreeOperation;
@@ -35,7 +35,6 @@ import io.hops.transaction.lock.TransactionLockTypes.INodeResolveType;
 import io.hops.transaction.lock.TransactionLocks;
 import org.apache.hadoop.fs.PathIsNotEmptyDirectoryException;
 import org.apache.hadoop.fs.permission.FsAction;
-import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
 import org.apache.hadoop.hdfs.server.namenode.INode.BlocksMapUpdateInfo;
 import org.apache.hadoop.util.ChunkedArrayList;
 
@@ -422,7 +421,7 @@ class FSDirDeleteOp {
    */
   private static long unprotectedDelete(
       FSDirectory fsd, INodesInPath iip, BlocksMapUpdateInfo collectedBlocks,
-      List<INode> removedINodes, long mtime) throws QuotaExceededException, StorageException, TransactionContextException {
+      List<INode> removedINodes, long mtime) throws IOException {
 
     // check if target node exists
     INode targetNode = iip.getLastINode();
@@ -470,12 +469,12 @@ class FSDirDeleteOp {
        if(child.isDirectory()){
          addMetaDataLogForDirDeletion(child);
        }else{
-         child.logMetadataEvent(MetadataLogEntry.Operation.DELETE);
+         child.logMetadataEvent(INodeMetadataLogEntry.Operation.Delete);
          child.logProvenanceEvent(FileProvenanceEntry.Operation.delete());
        }
       }
     }
-    targetNode.logMetadataEvent(MetadataLogEntry.Operation.DELETE);
+    targetNode.logMetadataEvent(INodeMetadataLogEntry.Operation.Delete);
     targetNode.logProvenanceEvent(FileProvenanceEntry.Operation.delete());
   }
 }
