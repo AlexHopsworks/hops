@@ -339,30 +339,65 @@ public abstract class INodeWithAdditionalFields extends INode {
     if(appId == null) {
        appId = "notls";
     }
-
+    
+    INodeDirectory[] parents = new INodeDirectory[]{null, null, null, null};
+    
+    
     INodeDirectory projectINode = null;
     INodeDirectory datasetINode = null;
-    String path = null;
+    String datasetName = "";
+    long p1=0, p2=0, p3=0;
     try {
-      if((this instanceof INodeDirectory) && isProject((INodeDirectory)this)) {
+      parents[0] = getParent();
+      if(parents[0] != null) {
+        p1 = parents[0].getId();
+        parents[1] = parents[0].getParent();
+      }
+      if(parents[1] != null) {
+        p2 = parents[1].getId();
+        parents[2] = parents[1].getParent();
+      }
+      if(parents[2] != null) {
+        p3 = parents[2].getId();
+        parents[3] = parents[2].getParent();
+      }
+      if(parents[2] == null) {
+        //this is a project
         projectINode = (INodeDirectory) this;
-      } else if ((this instanceof INodeDirectory) && isDataset((INodeDirectory)this)) {
+      } else if(parents[3] == null) {
+        //this is a dataset
         datasetINode = (INodeDirectory) this;
         projectINode = datasetINode.getParent();
+        datasetName = datasetINode.getLocalName();
       } else {
+        //this is a normal file
         datasetINode = getMetaEnabledParent();
         if (datasetINode == null) {
           return;
         }
+        datasetName = datasetINode.getLocalName();
         projectINode = datasetINode.getParent();
       }
-      path = parent.getFullPathName();
-      if(path == null) {
-        throw new RuntimeException("provenance log error2 - parent path");
-      }
-      if(path.length() > 998) {
-        path = path.substring(0, 998) + "..";
-      }
+      
+//      if((this instanceof INodeDirectory) && isProject((INodeDirectory)this)) {
+//        projectINode = (INodeDirectory) this;
+//      } else if ((this instanceof INodeDirectory) && isDataset((INodeDirectory)this)) {
+//        datasetINode = (INodeDirectory) this;
+//        projectINode = datasetINode.getParent();
+//      } else {
+//        datasetINode = getMetaEnabledParent();
+//        if (datasetINode == null) {
+//          return;
+//        }
+//        projectINode = datasetINode.getParent();
+//      }
+//      path = parent.getFullPathName();
+//      if(path == null) {
+//        throw new RuntimeException("provenance log error2 - parent path");
+//      }
+//      if(path.length() > 998) {
+//        path = path.substring(0, 998) + "..";
+//      }
     } catch (IOException ex) {
       throw new RuntimeException("provenance log error3", ex);
     }
@@ -370,10 +405,9 @@ public abstract class INodeWithAdditionalFields extends INode {
     String inodeName = getLocalName();
     long projectId = projectINode.getId();
     long datasetId = datasetINode == null ? 0l : datasetINode.getId();
-
-    FileProvenanceEntry ple = new FileProvenanceEntry(id, operationUserId, appId,
-      logicalTime, logicalTime, timestamp, timestamp, parentId, partitionId,
-      projectId, datasetId, inodeName, op, path);
+    
+    FileProvenanceEntry ple = new FileProvenanceEntry(id, op, logicalTime, timestamp, appId, operationUserId,
+      partitionId, p1, p2, p3, datasetId, projectId, inodeName, datasetName, logicalTime, timestamp);
     try {
       EntityManager.add(ple);
     } catch (IOException ex) {
@@ -381,30 +415,30 @@ public abstract class INodeWithAdditionalFields extends INode {
     }
   }
   
-  private boolean isDataset(INodeDirectory inode) {
-    try {
-      if (inode.getParent() != null) {
-        return isProject(inode.getParent());
-      } else {
-        return false;
-      }
-    } catch (StorageException | TransactionContextException ex) {
-      return false;
-    }
-  }
-  
-  private boolean isProject(INodeDirectory inode) {
-    try {
-      if (inode.getParent() != null) {
-        INodeDirectory projects = (INodeDirectory) INodeDirectory.getRootDir().getChild("Projects");
-        return inode.getParent().equals(projects);
-      } else {
-        return false;
-      }
-    } catch (StorageException | TransactionContextException ex) {
-      return false;
-    }
-  }
+//  private boolean isDataset(INodeDirectory inode) {
+//    try {
+//      if (inode.getParent() != null) {
+//        return isProject(inode.getParent());
+//      } else {
+//        return false;
+//      }
+//    } catch (StorageException | TransactionContextException ex) {
+//      return false;
+//    }
+//  }
+//  
+//  private boolean isProject(INodeDirectory inode) {
+//    try {
+//      if (inode.getParent() != null) {
+//        INodeDirectory projects = (INodeDirectory) INodeDirectory.getRootDir().getChild("Projects");
+//        return inode.getParent().equals(projects);
+//      } else {
+//        return false;
+//      }
+//    } catch (StorageException | TransactionContextException ex) {
+//      return false;
+//    }
+//  }
   
   public final int getLogicalTime() {
     return logicalTime;
