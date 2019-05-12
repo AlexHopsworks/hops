@@ -84,7 +84,7 @@ public class XAttrStorage {
     
     if(!xAttrExists) {
       logMetadataEvent(inode, xAttr, XAttrMetadataLogEntry.Operation.Add);
-      inode.logProvenanceEvent(FileProvenanceEntry.Operation.XATTR_ADD);
+      inode.logProvenanceEvent(FileProvenanceEntry.Operation.XATTR_ADD, xAttr);
     }else{
       logMetadataEvent(inode, xAttr, XAttrMetadataLogEntry.Operation.Update);
     }
