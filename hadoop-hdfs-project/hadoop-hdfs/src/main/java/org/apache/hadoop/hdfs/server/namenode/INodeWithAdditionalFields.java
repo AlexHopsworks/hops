@@ -33,6 +33,7 @@ import org.apache.hadoop.hdfs.DFSUtil;
 import java.io.IOException;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import org.apache.hadoop.fs.XAttr;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
 import org.apache.hadoop.security.UserGroupInformation;
 
@@ -327,6 +328,15 @@ public abstract class INodeWithAdditionalFields extends INode {
   
   @Override
   public void logProvenanceEvent(FileProvenanceEntry.Operation op) {
+    logProvenanceEvent(op, "");
+  }
+
+  @Override
+  public void logProvenanceEvent(FileProvenanceEntry.Operation op, XAttr xattr) {
+    logProvenanceEvent(op, xattr.getName());
+  }
+  
+  private void logProvenanceEvent(FileProvenanceEntry.Operation op, String xattrName) {
     UserGroupInformation ugi;
     int operationUserId;
     try {
@@ -341,7 +351,6 @@ public abstract class INodeWithAdditionalFields extends INode {
     }
     
     INodeDirectory[] parents = new INodeDirectory[]{null, null, null, null};
-    
     
     INodeDirectory projectINode = null;
     INodeDirectory datasetINode = null;
@@ -407,7 +416,7 @@ public abstract class INodeWithAdditionalFields extends INode {
     long datasetId = datasetINode == null ? 0l : datasetINode.getId();
     
     FileProvenanceEntry ple = new FileProvenanceEntry(id, op, logicalTime, timestamp, appId, operationUserId,
-      partitionId, p1, p2, p3, datasetId, projectId, inodeName, datasetName, logicalTime, timestamp);
+      partitionId, p1, p2, p3, datasetId, projectId, inodeName, datasetName, xattrName, logicalTime, timestamp);
     try {
       EntityManager.add(ple);
     } catch (IOException ex) {

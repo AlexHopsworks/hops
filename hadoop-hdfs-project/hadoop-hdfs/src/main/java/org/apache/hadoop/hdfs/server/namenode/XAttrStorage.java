@@ -24,6 +24,7 @@ import java.util.List;
 import com.google.common.collect.Lists;
 import io.hops.exception.StorageException;
 import io.hops.exception.TransactionContextException;
+import io.hops.metadata.hdfs.entity.FileProvenanceEntry;
 import io.hops.metadata.hdfs.entity.StoredXAttr;
 import io.hops.metadata.hdfs.entity.XAttrMetadataLogEntry;
 import io.hops.transaction.EntityManager;
@@ -83,6 +84,7 @@ public class XAttrStorage {
     
     if(!xAttrExists) {
       logMetadataEvent(inode, xAttr, XAttrMetadataLogEntry.Operation.Add);
+      inode.logProvenanceEvent(FileProvenanceEntry.Operation.XATTR_ADD);
     }else{
       logMetadataEvent(inode, xAttr, XAttrMetadataLogEntry.Operation.Update);
     }
