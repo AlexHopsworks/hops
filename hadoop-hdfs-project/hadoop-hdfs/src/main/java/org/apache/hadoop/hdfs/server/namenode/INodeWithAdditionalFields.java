@@ -326,17 +326,101 @@ public abstract class INodeWithAdditionalFields extends INode {
     }
   }
   
+  private static class ProvUtil {
+
+    final static String PROV_PROJECTS = "Projects";
+    final static String PROV_ML_MODELS = "Models";
+    final static String PROV_ML_FEATURES = "_featurestore.db";
+    final static String PROV_ML_TRAINING_DATASETS = "_Training_Datasets";
+    final static String PROV_XATTR_ID = "ml_id";
+    final static String PROV_XATTR_DEPS = "ml_deps";
+    
+    public static boolean isMLModel(INodeDirectory[] parents) {
+      //../<Dataset>/../<ML_MODEL>
+      return PROV_ML_MODELS.equals(parents[4]) && parents[1].equals(parents[4]);
+    }
+    
+    public static boolean isMLFeature(INodeDirectory[] parents) {
+      String features = parents[5] + PROV_ML_FEATURES;
+      //../<Dataset>/<ML_FEATURE>
+      return features.equals(parents[4]) && parents[0].equals(parents[4]);
+    }
+    
+    public static boolean isMLTrainingDataset(INodeDirectory[] parents) {
+      String trainingDatasets = parents[5] + PROV_ML_TRAINING_DATASETS;
+      //../<Dataset>/<ML_TRAINIG_DATASET>
+      return trainingDatasets.equals(parents[4]) && parents[0].equals(parents[4]);
+    }
+    
+    public static boolean logXAttrProv(INodeDirectory[] parents, XAttr xattr) {
+      //within a dataset && this is a model/featuregroup/trainigdataset directory
+      return parents[4] != null && (isMLModel(parents) || isMLFeature(parents) || isMLTrainingDataset(parents));
+    }
+    
+    public static boolean logFileProv(INodeDirectory[] parents) {
+      return parents[5] != null;
+    }
+    
+    public static INodeDirectory[] provenanceParents(INode inode) {
+      INodeDirectory[] parents = new INodeDirectory[]{null, null, null, null, null, null};
+      try {
+        parents[0] = inode.getParent();
+        parents[1] = parents[0] != null ? parents[0].getParent() : null;
+        parents[2] = parents[1] != null ? parents[1].getParent() : null;
+        parents[3] = parents[2] != null ? parents[2].getParent() : null;
+        if (parents[0] == null || parents[1] == null) {
+          //(1st level) - not tracking
+          return parents;
+        } else if (parents[2] == null) {
+          //(2nd level) - we only track projects 
+          if (inode instanceof INodeDirectory && ProvUtil.PROV_PROJECTS.equals(parents[1].getLocalName())) {
+            parents[5] = (INodeDirectory) inode;
+            return parents;
+          } else {
+            return parents;
+          }
+        } else if (parents[3] == null) {
+          //(3rd level) - we only track datasets 
+          if (inode instanceof INodeDirectory && ((INodeDirectory) inode).isMetaEnabled()) {
+            parents[4] = (INodeDirectory) inode;
+            parents[5] = parents[4].getParent();
+            return parents;
+          } else {
+            return parents;
+          }
+        } else {
+          //(4th+ level) - we only track files/dirs within datasets (meta enabled dirs) 
+          parents[4] = inode.getMetaEnabledParent();
+          if (parents[4] == null) {
+            return parents;
+          }
+          parents[5] = parents[4].getParent();
+          return parents;
+        }
+      } catch (IOException ex) {
+        throw new RuntimeException("provenance log error3", ex);
+      }
+    }
+  }
+  
   @Override
   public void logProvenanceEvent(FileProvenanceEntry.Operation op) {
-    logProvenanceEvent(op, "");
+    INodeDirectory[] parents = ProvUtil.provenanceParents(this);
+    //a project, a dataset or within a dataset
+    if(ProvUtil.logFileProv(parents)) {
+      logProvenanceEvent(parents, op, "");
+    }
   }
 
   @Override
   public void logProvenanceEvent(FileProvenanceEntry.Operation op, XAttr xattr) {
-    logProvenanceEvent(op, xattr.getName());
+    INodeDirectory[] parents = ProvUtil.provenanceParents(this);
+    if(ProvUtil.logXAttrProv(parents, xattr)) {
+      logProvenanceEvent(parents, op, xattr.getName());
+    }
   }
-  
-  private void logProvenanceEvent(FileProvenanceEntry.Operation op, String xattrName) {
+    
+  private void logProvenanceEvent(INodeDirectory[] parents, FileProvenanceEntry.Operation op, String xattrName) {
     UserGroupInformation ugi;
     int operationUserId;
     try {
@@ -350,71 +434,18 @@ public abstract class INodeWithAdditionalFields extends INode {
        appId = "notls";
     }
     
-    INodeDirectory[] parents = new INodeDirectory[]{null, null, null, null};
-    
-    INodeDirectory projectINode = null;
-    INodeDirectory datasetINode = null;
-    String datasetName = "";
-    long p1=0, p2=0, p3=0;
-    try {
-      parents[0] = getParent();
-      if(parents[0] != null) {
-        p1 = parents[0].getId();
-        parents[1] = parents[0].getParent();
-      }
-      if(parents[1] != null) {
-        p2 = parents[1].getId();
-        parents[2] = parents[1].getParent();
-      }
-      if(parents[2] != null) {
-        p3 = parents[2].getId();
-        parents[3] = parents[2].getParent();
-      }
-      if(parents[2] == null) {
-        //this is a project
-        projectINode = (INodeDirectory) this;
-      } else if(parents[3] == null) {
-        //this is a dataset
-        datasetINode = (INodeDirectory) this;
-        projectINode = datasetINode.getParent();
-        datasetName = datasetINode.getLocalName();
-      } else {
-        //this is a normal file
-        datasetINode = getMetaEnabledParent();
-        if (datasetINode == null) {
-          return;
-        }
-        datasetName = datasetINode.getLocalName();
-        projectINode = datasetINode.getParent();
-      }
-      
-//      if((this instanceof INodeDirectory) && isProject((INodeDirectory)this)) {
-//        projectINode = (INodeDirectory) this;
-//      } else if ((this instanceof INodeDirectory) && isDataset((INodeDirectory)this)) {
-//        datasetINode = (INodeDirectory) this;
-//        projectINode = datasetINode.getParent();
-//      } else {
-//        datasetINode = getMetaEnabledParent();
-//        if (datasetINode == null) {
-//          return;
-//        }
-//        projectINode = datasetINode.getParent();
-//      }
-//      path = parent.getFullPathName();
-//      if(path == null) {
-//        throw new RuntimeException("provenance log error2 - parent path");
-//      }
-//      if(path.length() > 998) {
-//        path = path.substring(0, 998) + "..";
-//      }
-    } catch (IOException ex) {
-      throw new RuntimeException("provenance log error3", ex);
-    }
     long timestamp = System.currentTimeMillis();
-    String inodeName = getLocalName();
-    long projectId = projectINode.getId();
-    long datasetId = datasetINode == null ? 0l : datasetINode.getId();
-    
+    String inodeName = getLocalName(); 
+    long p1 = parents[0] != null ? parents[0].getId() : 0;
+    long p2 = parents[1] != null ? parents[1].getId() : 0;
+    long p3 = parents[2] != null ? parents[2].getId() : 0;
+    String datasetName = "";
+    long datasetId = 0;
+    if(parents[4] != null) {
+      datasetId = parents[4].getId();
+      datasetName = parents[4].getLocalName();
+    }
+    long projectId = parents[5].getId();
     FileProvenanceEntry ple = new FileProvenanceEntry(id, op, logicalTime, timestamp, appId, operationUserId,
       partitionId, p1, p2, p3, datasetId, projectId, inodeName, datasetName, xattrName, logicalTime, timestamp);
     try {
@@ -423,31 +454,6 @@ public abstract class INodeWithAdditionalFields extends INode {
       throw new RuntimeException("provenance log error3", ex);
     }
   }
-  
-//  private boolean isDataset(INodeDirectory inode) {
-//    try {
-//      if (inode.getParent() != null) {
-//        return isProject(inode.getParent());
-//      } else {
-//        return false;
-//      }
-//    } catch (StorageException | TransactionContextException ex) {
-//      return false;
-//    }
-//  }
-//  
-//  private boolean isProject(INodeDirectory inode) {
-//    try {
-//      if (inode.getParent() != null) {
-//        INodeDirectory projects = (INodeDirectory) INodeDirectory.getRootDir().getChild("Projects");
-//        return inode.getParent().equals(projects);
-//      } else {
-//        return false;
-//      }
-//    } catch (StorageException | TransactionContextException ex) {
-//      return false;
-//    }
-//  }
   
   public final int getLogicalTime() {
     return logicalTime;
