@@ -412,8 +412,10 @@ public abstract class INodeWithAdditionalFields extends INode {
       datasetName = parents[4].getLocalName();
     }
     long projectId = parents[5].getId();
+    String projectName = parents[5].getLocalName();
     FileProvenanceEntry ple = new FileProvenanceEntry(id, op, logicalTime, timestamp, appId, operationUserId,
-      partitionId, p1, p2, p3, datasetId, projectId, inodeName, datasetName, xattrName, logicalTime, timestamp);
+      partitionId, p1, p2, p3, datasetId, projectId, inodeName, datasetName, projectName, xattrName, 
+      logicalTime, timestamp);
     try {
       EntityManager.add(ple);
     } catch (IOException ex) {
