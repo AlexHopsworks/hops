@@ -326,96 +326,62 @@ public abstract class INodeWithAdditionalFields extends INode {
     }
   }
   
-  private static class ProvUtil {
+  final static String PROV_PROJECTS = "Projects";
 
-    final static String PROV_PROJECTS = "Projects";
-    final static String PROV_ML_MODELS = "Models";
-    final static String PROV_ML_FEATURES = "_featurestore.db";
-    final static String PROV_ML_TRAINING_DATASETS = "_Training_Datasets";
-    final static String PROV_XATTR_ID = "ml_id";
-    final static String PROV_XATTR_DEPS = "ml_deps";
-    
-    public static boolean isMLModel(INodeDirectory[] parents) {
-      //../<Dataset>/../<ML_MODEL>
-      return PROV_ML_MODELS.equals(parents[4]) && parents[1].equals(parents[4]);
-    }
-    
-    public static boolean isMLFeature(INodeDirectory[] parents) {
-      String features = parents[5] + PROV_ML_FEATURES;
-      //../<Dataset>/<ML_FEATURE>
-      return features.equals(parents[4]) && parents[0].equals(parents[4]);
-    }
-    
-    public static boolean isMLTrainingDataset(INodeDirectory[] parents) {
-      String trainingDatasets = parents[5] + PROV_ML_TRAINING_DATASETS;
-      //../<Dataset>/<ML_TRAINIG_DATASET>
-      return trainingDatasets.equals(parents[4]) && parents[0].equals(parents[4]);
-    }
-    
-    public static boolean logXAttrProv(INodeDirectory[] parents, XAttr xattr) {
-      //within a dataset && this is a model/featuregroup/trainigdataset directory
-      return parents[4] != null && (isMLModel(parents) || isMLFeature(parents) || isMLTrainingDataset(parents));
-    }
-    
-    public static boolean logFileProv(INodeDirectory[] parents) {
-      return parents[5] != null;
-    }
-    
-    public static INodeDirectory[] provenanceParents(INode inode) {
-      INodeDirectory[] parents = new INodeDirectory[]{null, null, null, null, null, null};
-      try {
-        parents[0] = inode.getParent();
-        parents[1] = parents[0] != null ? parents[0].getParent() : null;
-        parents[2] = parents[1] != null ? parents[1].getParent() : null;
-        parents[3] = parents[2] != null ? parents[2].getParent() : null;
-        if (parents[0] == null || parents[1] == null) {
-          //(1st level) - not tracking
+  public INodeDirectory[] provenanceParents(INode inode) {
+    INodeDirectory[] parents = new INodeDirectory[]{null, null, null, null, null, null};
+    try {
+      parents[0] = inode.getParent();
+      parents[1] = parents[0] != null ? parents[0].getParent() : null;
+      parents[2] = parents[1] != null ? parents[1].getParent() : null;
+      parents[3] = parents[2] != null ? parents[2].getParent() : null;
+      if (parents[0] == null || parents[1] == null) {
+        //(1st level) - not tracking
+        return parents;
+      } else if (parents[2] == null) {
+        //(2nd level) - we only track projects 
+        if (inode instanceof INodeDirectory && PROV_PROJECTS.equals(parents[1].getLocalName())) {
+          parents[5] = (INodeDirectory) inode;
           return parents;
-        } else if (parents[2] == null) {
-          //(2nd level) - we only track projects 
-          if (inode instanceof INodeDirectory && ProvUtil.PROV_PROJECTS.equals(parents[1].getLocalName())) {
-            parents[5] = (INodeDirectory) inode;
-            return parents;
-          } else {
-            return parents;
-          }
-        } else if (parents[3] == null) {
-          //(3rd level) - we only track datasets 
-          if (inode instanceof INodeDirectory && ((INodeDirectory) inode).isMetaEnabled()) {
-            parents[4] = (INodeDirectory) inode;
-            parents[5] = parents[4].getParent();
-            return parents;
-          } else {
-            return parents;
-          }
         } else {
-          //(4th+ level) - we only track files/dirs within datasets (meta enabled dirs) 
-          parents[4] = inode.getMetaEnabledParent();
-          if (parents[4] == null) {
-            return parents;
-          }
-          parents[5] = parents[4].getParent();
           return parents;
         }
-      } catch (IOException ex) {
-        throw new RuntimeException("provenance log error3", ex);
+      } else if (parents[3] == null) {
+        //(3rd level) - we only track datasets 
+        if (inode instanceof INodeDirectory && ((INodeDirectory) inode).isMetaEnabled()) {
+          parents[4] = (INodeDirectory) inode;
+          parents[5] = parents[4].getParent();
+          return parents;
+        } else {
+          return parents;
+        }
+      } else {
+        //(4th+ level) - we only track files/dirs within datasets (meta enabled dirs) 
+        parents[4] = inode.getMetaEnabledParent();
+        if (parents[4] == null) {
+          return parents;
+        }
+        parents[5] = parents[4].getParent();
+        return parents;
       }
+    } catch (IOException ex) {
+      throw new RuntimeException("provenance log error3", ex);
     }
   }
   
   @Override
   public void logProvenanceEvent(FileProvenanceEntry.Operation op) {
-    INodeDirectory[] parents = ProvUtil.provenanceParents(this);
+    INodeDirectory[] parents = provenanceParents(this);
     //a project, a dataset or within a dataset
-    if(ProvUtil.logFileProv(parents)) {
+    if(parents[5] != null) {
       logProvenanceEvent(parents, op, "");
     }
   }
 
   @Override
   public void logProvenanceEvent(FileProvenanceEntry.Operation op, XAttr xattr) {
-    INodeDirectory[] parents = ProvUtil.provenanceParents(this);
-    if(ProvUtil.logXAttrProv(parents, xattr)) {
+    INodeDirectory[] parents = provenanceParents(this);
+    if(parents[5] != null && XAttr.NameSpace.PROVENANCE.equals(xattr.getNameSpace())) {
       logProvenanceEvent(parents, op, xattr.getName());
     }
   }
