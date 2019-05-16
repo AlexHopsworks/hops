@@ -847,7 +847,7 @@ public class BlockManager {
         // always decrement total blocks
         -1);
 
-    final long fileLength = bc.computeContentSummary().getLength();
+    final long fileLength = bc.computeContentSummary(getStoragePolicySuite()).getLength();
     final long pos = fileLength - ucBlock.getNumBytes();
     return createLocatedBlock(ucBlock, pos, AccessMode.WRITE);
   }
@@ -2032,9 +2032,10 @@ public class BlockManager {
       if ((nodesCorrupt != null) && nodesCorrupt.contains(node)) {
         continue;
       }
-      if (priority != UnderReplicatedBlocks.QUEUE_HIGHEST_PRIORITY
-          && !node.isDecommissionInProgress()
-          && node.getNumberOfBlocksToBeReplicated() >= maxReplicationStreams) {
+      if(priority != UnderReplicatedBlocks.QUEUE_HIGHEST_PRIORITY 
+          && !node.isDecommissionInProgress() 
+          && node.getNumberOfBlocksToBeReplicated() >= maxReplicationStreams)
+      {
         continue; // already reached replication limit
       }
       if (node.getNumberOfBlocksToBeReplicated() >= replicationStreamsHardLimit) {
@@ -2048,15 +2049,6 @@ public class BlockManager {
       if (node.isDecommissioned()) {
         continue;
       }
-      // we prefer nodes that are in DECOMMISSION_INPROGRESS state
-      if (node.isDecommissionInProgress() || srcNode == null) {
-        srcNode = node;
-        continue;
-      }
-      if (srcNode.isDecommissionInProgress()) {
-        continue;
-      }
-
       // We got this far, current node is a reasonable choice
       if (srcNode == null) {
         srcNode = node;
@@ -4598,6 +4590,11 @@ public class BlockManager {
    * liveness. Dead nodes cannot always be safely decommissioned.
    */
   boolean isNodeHealthyForDecommission(DatanodeDescriptor node) throws IOException {
+    if (!node.checkBlockReportReceived()) {
+      LOG.info("Node {} hasn't sent its first block report.", node);
+      return false;
+    }
+
     if (node.isAlive) {
       return true;
     }
@@ -4636,10 +4633,9 @@ public class BlockManager {
   public void removeBlock(Block block)
       throws StorageException, TransactionContextException, IOException {
     addToInvalidates(block);
-    corruptReplicas.removeFromCorruptReplicasMap(getBlockInfo(block));
     BlockInfoContiguous storedBlock = getBlockInfo(block);
-    blocksMap.removeBlock(block);
-    // Remove the block from pendingReplications and neededReplications
+    removeBlockFromMap(block);
+    // Remove the block from pendingReplications and neededReplications    
     pendingReplications.remove(storedBlock);
     neededReplications.remove(storedBlock);
     if (postponedMisreplicatedBlocks.remove(block)) {
@@ -4701,6 +4697,27 @@ public class BlockManager {
   }
 
   /**
+   * Check that the indicated blocks are present and
+   * replicated.
+   */
+  public boolean checkBlocksProperlyReplicated(
+      String src, BlockInfoContiguous[] blocks) throws StorageException, TransactionContextException {
+    for (BlockInfoContiguous b: blocks) {
+      if (!b.isComplete()) {
+        final BlockInfoContiguousUnderConstruction uc =
+            (BlockInfoContiguousUnderConstruction)b;
+        final int numNodes = b.getStorages(getDatanodeManager()).length;
+        LOG.info("BLOCK* " + b + " is not COMPLETE (ucState = "
+          + uc.getBlockUCState() + ", replication# = " + numNodes
+          + (numNodes < minReplication ? " < ": " >= ")
+          + " minimum = " + minReplication + ") in file " + src);
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** 
    * @return 0 if the block is not found;
    * otherwise, return the replication factor of the block.
    */
@@ -4822,11 +4839,21 @@ public class BlockManager {
     return corruptReplicas.numCorruptReplicas(getBlockInfo(block));
   }
 
-  public void removeBlockFromMap(Block block)
-      throws StorageException, TransactionContextException {
+  public void removeBlockFromMap(Block block) throws IOException {
+    removeFromExcessReplicateMap(getBlockInfo(block));
     // If block is removed from blocksMap remove it from corruptReplicasMap
     corruptReplicas.removeFromCorruptReplicasMap(getBlockInfo(block));
     blocksMap.removeBlock(block);
+  }
+
+  /**
+   * If a block is removed from blocksMap, remove it from excessReplicateMap.
+   */
+  private void removeFromExcessReplicateMap(Block block) throws IOException {
+    BlockInfoContiguous blockInfo = getBlockInfo(block);
+    for (DatanodeStorageInfo info : blocksMap.getStorages(blockInfo)) {
+      excessReplicateMap.remove(info.getDatanodeDescriptor(), blockInfo);
+    }
   }
 
   public int getCapacity() {

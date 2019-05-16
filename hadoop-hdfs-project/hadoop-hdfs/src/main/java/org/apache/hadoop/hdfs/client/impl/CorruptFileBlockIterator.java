@@ -16,8 +16,11 @@
  * limitations under the License.
  */
 
-package org.apache.hadoop.hdfs;
+package org.apache.hadoop.hdfs.client.impl;
 
+
+import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.hdfs.DFSClient;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.hdfs.protocol.CorruptFileBlocks;
@@ -29,6 +32,7 @@ import java.util.NoSuchElementException;
  * Provides an iterator interface for listCorruptFileBlocks.
  * This class is used by DistributedFileSystem and Hdfs.
  */
+@InterfaceAudience.Private
 public class CorruptFileBlockIterator implements RemoteIterator<Path> {
   private final DFSClient dfs;
   private String path;

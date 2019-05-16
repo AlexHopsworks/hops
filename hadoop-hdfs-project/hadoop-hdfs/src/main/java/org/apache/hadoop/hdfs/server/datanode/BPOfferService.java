@@ -144,8 +144,7 @@ class BPOfferService implements Runnable {
   // sent immediately by the actor thread without waiting for the IBR timer
   // to elapse.
   private volatile boolean sendImmediateIBR = false;
-  volatile long lastDeletedReport = 0;
-  // lastBlockReport, lastDeletedReport and lastHeartbeat may be assigned/read
+  // lastBlockReport and lastHeartbeat may be assigned/read
   // by testing threads (through BPServiceActor#triggerXXX), while also
   // assigned/read by the actor thread. Thus they should be declared as volatile
   // to make sure the "happens-before" consistency.
@@ -153,6 +152,8 @@ class BPOfferService implements Runnable {
   private boolean resetBlockReportTime = true;
   
   volatile long lastCacheReport = 0;
+  
+  private volatile long lastHeartbeat = 0;
   
   private BPServiceActor blkReportHander = null;
   private List<ActiveNode> nnList = Collections.synchronizedList(new ArrayList<ActiveNode>());
@@ -180,7 +181,7 @@ class BPOfferService implements Runnable {
   private Thread blockReportThread = null;
 
   private Random rand = new Random(System.currentTimeMillis());
-
+  private long prevBlockReportId;
 
   BPOfferService(List<InetSocketAddress> nnAddrs, DataNode dn) {
     Preconditions
@@ -199,6 +200,7 @@ class BPOfferService implements Runnable {
     maxNumIncrementalReportThreads = dnConf.iBRDispatherTPSize;
     incrementalBRExecutor = Executors.newFixedThreadPool(maxNumIncrementalReportThreads);
     brDispatcher = Executors.newSingleThreadExecutor();
+    prevBlockReportId = DFSUtil.getRandom().nextLong();
 
   }
 
@@ -714,7 +716,6 @@ class BPOfferService implements Runnable {
         // Send a copy of a block to another datanode
         dn.transferBlocks(bcmd.getBlockPoolId(), bcmd.getBlocks(),
             bcmd.getTargets(), bcmd.getTargetStorageTypes());
-        dn.metrics.incrBlocksReplicated(bcmd.getBlocks().length);
         break;
       case DatanodeProtocol.DNA_INVALIDATE:
         //
@@ -827,11 +828,11 @@ class BPOfferService implements Runnable {
     while (dn.shouldRun) {  //as long as datanode is alive keep working
       try {
         long startTime = now();
+        boolean sendHeartbeat =
+            startTime - lastHeartbeat >= dnConf.heartBeatInterval;
 
-        if (sendImmediateIBR ||
-            (startTime - lastDeletedReport > dnConf.deleteReportInterval)) {
+        if (sendImmediateIBR || sendHeartbeat) {
           reportReceivedDeletedBlocks();
-          lastDeletedReport = startTime;
         }
 
         startBRThread();
@@ -1074,7 +1075,7 @@ public class IncrementalBRTask implements Callable{
     // or we will report an RBW replica after the BlockReport already reports
     // a FINALIZED one.
     reportReceivedDeletedBlocks();
-    lastDeletedReport = startTime;
+    lastHeartbeat = startTime;
 
     long brCreateStartTime = now();
     Map<DatanodeStorage, BlockReport> perVolumeBlockLists =
@@ -1226,9 +1227,11 @@ public class IncrementalBRTask implements Callable{
       long createCost = createTime - startTime;
       long sendCost = sendTime - createTime;
       dn.getMetrics().addCacheReport(sendCost);
-      LOG.debug("CacheReport of " + blockIds.size()
-          + " block(s) took " + createCost + " msec to generate and "
-          + sendCost + " msecs for RPC and NN processing");
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("CacheReport of " + blockIds.size()
+            + " block(s) took " + createCost + " msec to generate and "
+            + sendCost + " msecs for RPC and NN processing");
+      }
     }
     return cmd;
   }
@@ -1266,10 +1269,10 @@ public class IncrementalBRTask implements Callable{
 
   void triggerDeletionReportForTestsInt() {
     synchronized (pendingIncrementalBRperStorage) {
-      lastDeletedReport = 0;
+      sendImmediateIBR = true;
       pendingIncrementalBRperStorage.notifyAll();
 
-      while (lastDeletedReport == 0) {
+      while (sendImmediateIBR) {
         try {
           pendingIncrementalBRperStorage.wait(100);
         } catch (InterruptedException e) {
@@ -1284,15 +1287,15 @@ public class IncrementalBRTask implements Callable{
     return sendImmediateIBR;
   }
 
-  private long prevBlockReportId = 0;
-
   private long generateUniqueBlockReportId() {
-    long id = System.nanoTime();
-    if (id <= prevBlockReportId) {
-      id = prevBlockReportId + 1;
+    // Initialize the block report ID the first time through.
+    // Note that 0 is used on the NN to indicate "uninitialized", so we should
+    // not send a 0 value ourselves.
+    prevBlockReportId++;
+    while (prevBlockReportId == 0) {
+      prevBlockReportId = DFSUtil.getRandom().nextLong();  
     }
-    prevBlockReportId = id;
-    return id;
+    return prevBlockReportId;
   }
   
   void updateNNList(SortedActiveNodeList list) throws IOException {

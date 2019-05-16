@@ -256,8 +256,10 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
     this.validVolsRequired = volsConfigured - volFailuresTolerated;
 
     if (volFailuresTolerated < 0 || volFailuresTolerated >= volsConfigured) {
-      throw new DiskErrorException(
-          "Invalid volume failure " + " config value: " + volFailuresTolerated);
+      throw new DiskErrorException("Invalid value configured for "
+          + "dfs.datanode.failed.volumes.tolerated - " + volFailuresTolerated
+          + ". Value configured is either less than 0 or >= "
+          + "to the number of configured volumes (" + volsConfigured + ").");
     }
     if (volsFailed > volFailuresTolerated) {
       throw new DiskErrorException(
@@ -1304,38 +1306,59 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
   }
 
   @Override // FsDatasetSpi
-  public synchronized ReplicaHandler createTemporary(
+  public ReplicaHandler createTemporary(
       StorageType storageType, ExtendedBlock b) throws IOException {
-    ReplicaInfo replicaInfo = volumeMap.get(b.getBlockPoolId(), b.getBlockId());
-    if (replicaInfo != null) {
-      if (replicaInfo.getGenerationStamp() < b.getGenerationStamp()
-          && replicaInfo instanceof ReplicaInPipeline) {
-        // Stop the previous writer
-        ((ReplicaInPipeline)replicaInfo)
-                      .stopWriter(datanode.getDnConf().getXceiverStopTimeout());
-        invalidate(b.getBlockPoolId(), new Block[]{replicaInfo});
-      } else {
-        throw new ReplicaAlreadyExistsException("Block " + b +
-            " already exists in state " + replicaInfo.getState() +
-            " and thus cannot be created.");
+    long startTimeMs = Time.monotonicNow();
+    long writerStopTimeoutMs = datanode.getDnConf().getXceiverStopTimeout();
+    ReplicaInfo lastFoundReplicaInfo = null;
+    do {
+      synchronized (this) {
+        ReplicaInfo currentReplicaInfo =
+            volumeMap.get(b.getBlockPoolId(), b.getBlockId());
+        if (currentReplicaInfo == lastFoundReplicaInfo) {
+          if (lastFoundReplicaInfo != null) {
+            invalidate(b.getBlockPoolId(), new Block[] { lastFoundReplicaInfo });
+          }
+          FsVolumeReference ref =
+              volumes.getNextVolume(storageType, b.getNumBytes());
+          FsVolumeImpl v = (FsVolumeImpl) ref.getVolume();
+          // create a temporary file to hold block in the designated volume
+          File f;
+          try {
+            f = v.createTmpFile(b.getBlockPoolId(), b.getLocalBlock());
+          } catch (IOException e) {
+            IOUtils.cleanup(null, ref);
+            throw e;
+          }
+          ReplicaInPipeline newReplicaInfo =
+              new ReplicaInPipeline(b.getBlockId(), b.getGenerationStamp(), v,
+                  f.getParentFile(), 0);
+          volumeMap.add(b.getBlockPoolId(), newReplicaInfo);
+          return new ReplicaHandler(newReplicaInfo, ref);
+        } else {
+          if (!(currentReplicaInfo.getGenerationStamp() < b
+              .getGenerationStamp() && currentReplicaInfo instanceof ReplicaInPipeline)) {
+            throw new ReplicaAlreadyExistsException("Block " + b
+                + " already exists in state " + currentReplicaInfo.getState()
+                + " and thus cannot be created.");
+          }
+          lastFoundReplicaInfo = currentReplicaInfo;
+        }
       }
-    }
 
-    FsVolumeReference ref = volumes.getNextVolume(storageType, b.getNumBytes());
-    FsVolumeImpl v = (FsVolumeImpl) ref.getVolume();
-    // create a temporary file to hold block in the designated volume
-    File f;
-    try {
-      f = v.createTmpFile(b.getBlockPoolId(), b.getLocalBlock());
-    } catch (IOException e) {
-      IOUtils.cleanup(null, ref);
-      throw e;
-    }
+      // Hang too long, just bail out. This is not supposed to happen.
+      long writerStopMs = Time.monotonicNow() - startTimeMs;
+      if (writerStopMs > writerStopTimeoutMs) {
+        LOG.warn("Unable to stop existing writer for block " + b + " after " 
+            + writerStopMs + " miniseconds.");
+        throw new IOException("Unable to stop existing writer for block " + b
+            + " after " + writerStopMs + " miniseconds.");
+      }
 
-    ReplicaInPipeline newReplicaInfo = new ReplicaInPipeline(b.getBlockId(), 
-        b.getGenerationStamp(), v, f.getParentFile(), 0);
-    volumeMap.add(b.getBlockPoolId(), newReplicaInfo);
-    return new ReplicaHandler(newReplicaInfo, ref);
+      // Stop the previous writer
+      ((ReplicaInPipeline) lastFoundReplicaInfo)
+          .stopWriter(writerStopTimeoutMs);
+    } while (true);
   }
 
   /**
@@ -2299,8 +2322,9 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
   @Override
   public synchronized void shutdownBlockPool(String bpid) {
     LOG.info("Removing block pool " + bpid);
+    Map<DatanodeStorage, BlockReport> blocksPerVolume =  getBlockReports(bpid);
     volumeMap.cleanUpBlockPool(bpid);
-    volumes.removeBlockPool(bpid);
+    volumes.removeBlockPool(bpid, blocksPerVolume);
   }
   
   /**
@@ -2308,9 +2332,9 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
    */
   private static class VolumeInfo {
     final String directory;
-    final long usedSpace;
-    final long freeSpace;
-    final long reservedSpace;
+    final long usedSpace; // size of space used by HDFS
+    final long freeSpace; // size of free space excluding reserved space
+    final long reservedSpace; // size of space reserved for non-HDFS and RBW
 
     VolumeInfo(FsVolumeImpl v, long usedSpace, long freeSpace) {
       this.directory = v.toString();

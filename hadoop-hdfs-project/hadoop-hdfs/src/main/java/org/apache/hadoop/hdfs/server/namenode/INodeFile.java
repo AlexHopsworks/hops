@@ -23,6 +23,8 @@ import io.hops.metadata.HdfsStorageFactory;
 import io.hops.metadata.hdfs.dal.*;
 import io.hops.metadata.hdfs.entity.FileInodeData;
 import io.hops.transaction.EntityManager;
+import static org.apache.hadoop.hdfs.server.blockmanagement.BlockStoragePolicySuite.ID_UNSPECIFIED;
+
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.apache.hadoop.fs.StorageType;
@@ -159,7 +161,7 @@ public class INodeFile extends INodeWithAdditionalFields implements BlockCollect
   @Override
   public byte getStoragePolicyID() throws TransactionContextException, StorageException {
     byte id = getLocalStoragePolicyID();
-    if (id == BlockStoragePolicySuite.ID_UNSPECIFIED) {
+    if (id == ID_UNSPECIFIED) {
       return this.getParent() != null ? this.getParent().getStoragePolicyID() : id;
     }
     return id;
@@ -341,11 +343,25 @@ public class INodeFile extends INodeWithAdditionalFields implements BlockCollect
 
   @Override
   public final ContentSummaryComputationContext computeContentSummary(
-      final ContentSummaryComputationContext summary) throws StorageException, TransactionContextException {
-    final Content.Counts counts = summary.getCounts();
-    counts.add(Content.LENGTH, computeFileSize());
-    counts.add(Content.FILE, 1);
-    counts.add(Content.DISKSPACE, storagespaceConsumed());
+      final ContentSummaryComputationContext summary) throws TransactionContextException, StorageException {
+    final ContentCounts counts = summary.getCounts();
+    long fileLen = 0;
+    fileLen = computeFileSize();
+    counts.addContent(Content.FILE, 1);
+    counts.addContent(Content.LENGTH, fileLen);
+    counts.addContent(Content.DISKSPACE, storagespaceConsumed());
+
+    if (getStoragePolicyID() != ID_UNSPECIFIED){
+      BlockStoragePolicy bsp = summary.getBlockStoragePolicySuite().
+          getPolicy(getStoragePolicyID());
+      List<StorageType> storageTypes = bsp.chooseStorageTypes(HeaderFormat.getReplication(header));
+      for (StorageType t : storageTypes) {
+        if (!t.supportTypeQuota()) {
+          continue;
+        }
+        counts.addTypeSpace(t, fileLen);
+      }
+    }
     return summary;
   }
   
@@ -393,7 +409,7 @@ public class INodeFile extends INodeWithAdditionalFields implements BlockCollect
   }
 
   @Override
-  QuotaCounts computeQuotaUsage(BlockStoragePolicySuite bsps, QuotaCounts counts)
+  QuotaCounts computeQuotaUsage(BlockStoragePolicySuite bsps, byte blockStoragePolicyId, QuotaCounts counts)
       throws StorageException, TransactionContextException {
     long nsDelta = 1;
     final long ssDeltaNoReplication;
@@ -404,8 +420,8 @@ public class INodeFile extends INodeWithAdditionalFields implements BlockCollect
     counts.addStorageSpace(ssDeltaNoReplication * replication);
     
     //storage policy is not set for new inodes
-    if (ssDeltaNoReplication > 0 && getStoragePolicyID() != BlockStoragePolicySuite.ID_UNSPECIFIED){
-      BlockStoragePolicy bsp = bsps.getPolicy(getStoragePolicyID());
+    if (blockStoragePolicyId != ID_UNSPECIFIED){
+      BlockStoragePolicy bsp = bsps.getPolicy(blockStoragePolicyId);
       List<StorageType> storageTypes = bsp.chooseStorageTypes(replication);
       for (StorageType t : storageTypes) {
         if (!t.supportTypeQuota()) {

@@ -123,6 +123,7 @@ import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.datanode.SecureDataNodeStarter.SecureResources;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.FsVolumeImpl;
 import org.apache.hadoop.hdfs.server.datanode.metrics.DataNodeMetrics;
 import org.apache.hadoop.hdfs.server.namenode.FileChecksumServlets;
 import org.apache.hadoop.hdfs.server.namenode.StreamFile;
@@ -370,6 +371,9 @@ public class DataNode extends ReconfigurableBase
   
   final Tracer tracer;
   private final TracerConfigurationManager tracerConfigurationManager;
+  private static final int NUM_CORES = Runtime.getRuntime()
+      .availableProcessors();
+  private static final double CONGESTION_RATIO = 1.5;
 
   private static Tracer createTracer(Configuration conf) {
     return new Tracer.Builder("DataNode").
@@ -517,8 +521,13 @@ public class DataNode extends ReconfigurableBase
    * </ul>
    */
   public PipelineAck.ECN getECN() {
-    return pipelineSupportECN ? PipelineAck.ECN.SUPPORTED : PipelineAck.ECN
-      .DISABLED;
+    if (!pipelineSupportECN) {
+      return PipelineAck.ECN.DISABLED;
+    }
+    double load = ManagementFactory.getOperatingSystemMXBean()
+        .getSystemLoadAverage();
+    return load > NUM_CORES * CONGESTION_RATIO ? PipelineAck.ECN.CONGESTED :
+        PipelineAck.ECN.SUPPORTED;
   }
 
   /**
@@ -666,6 +675,10 @@ public class DataNode extends ReconfigurableBase
       conf.set(DFS_DATANODE_DATA_DIR_KEY,
           Joiner.on(",").join(effectiveVolumes));
       dataDirs = getStorageLocations(conf);
+
+      // Send a full block report to let NN acknowledge the volume changes.
+      triggerBlockReport(new BlockReportOptions.Factory()
+          .setIncremental(false).build());
     }
   }
 
@@ -1459,12 +1472,12 @@ public class DataNode extends ReconfigurableBase
     blockScanner.enableBlockPoolId(bpos.getBlockPoolId());
   }
 
-  BPOfferService[] getAllBpOs() {
+  List<BPOfferService> getAllBpOs() {
     return blockPoolManager.getAllNamenodeThreads();
   }
   
   int getBpOsCount() {
-    return blockPoolManager.getAllNamenodeThreads().length;
+    return blockPoolManager.getAllNamenodeThreads().size();
   }
   
   /**
@@ -1774,12 +1787,9 @@ public class DataNode extends ReconfigurableBase
       }
     }
     
-    // We need to make a copy of the original blockPoolManager#offerServices to
-    // make sure blockPoolManager#shutDownAll() can still access all the 
-    // BPOfferServices, since after setting DataNode#shouldRun to false the 
-    // offerServices may be modified.
-    BPOfferService[] bposArray = this.blockPoolManager == null ? null :
-        this.blockPoolManager.getAllNamenodeThreads();
+    List<BPOfferService> bposArray = (this.blockPoolManager == null)
+        ? new ArrayList<BPOfferService>()
+        : this.blockPoolManager.getAllNamenodeThreads();
     // If shutdown is not for restart, set shouldRun to false early. 
     if (!shutdownForUpgrade) {
       shouldRun = false;
@@ -2345,6 +2355,8 @@ public class DataNode extends ReconfigurableBase
                   "Bad connect ack, targets=" + Arrays.asList(targets));
             }
           }
+        } else {
+          metrics.incrBlocksReplicated();
         }
       } catch (IOException ie) {
         LOG.warn(bpReg + ":Failed to transfer " + b + " to " +
@@ -2549,8 +2561,7 @@ public class DataNode extends ReconfigurableBase
     while (shouldRun) {
       try {
         blockPoolManager.joinAll();
-        if (blockPoolManager.getAllNamenodeThreads() != null &&
-            blockPoolManager.getAllNamenodeThreads().length == 0) {
+        if (blockPoolManager.getAllNamenodeThreads().size() == 0) {
           shouldRun = false;
         }
         // Terminate if shutdown is complete or 2 seconds after all BPs
@@ -2714,6 +2725,10 @@ public class DataNode extends ReconfigurableBase
     return blockScanner;
   }
 
+  @VisibleForTesting
+  DirectoryScanner getDirectoryScanner() {
+    return directoryScanner;
+  }
 
   public static void secureMain(String args[], SecureResources resources) {
     int errorCode = 0;

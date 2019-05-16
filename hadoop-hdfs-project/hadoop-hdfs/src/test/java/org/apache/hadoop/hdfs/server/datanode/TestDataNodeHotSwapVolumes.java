@@ -33,12 +33,17 @@ import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.MiniDFSNNTopology;
+import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+import org.apache.hadoop.hdfs.protocolPB.DatanodeProtocolClientSideTranslatorPB;
 import org.apache.hadoop.hdfs.server.common.Storage;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.FsDatasetTestUtil;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.FsVolumeImpl;
+import org.apache.hadoop.hdfs.server.protocol.BlockReportContext;
+import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
+import org.apache.hadoop.hdfs.server.protocol.StorageBlockReport;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.junit.After;
 import org.junit.Test;
@@ -58,6 +63,9 @@ import java.util.concurrent.TimeoutException;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.mockito.Mockito;
+import org.mockito.invocation.InvocationOnMock;
+import org.mockito.stubbing.Answer;
 
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DATANODE_DATA_DIR_KEY;
 import org.apache.hadoop.hdfs.server.protocol.BlockReport;
@@ -71,6 +79,10 @@ import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import org.junit.Ignore;
+import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.timeout;
 
 public class TestDataNodeHotSwapVolumes {
   private static final Log LOG = LogFactory.getLog(
@@ -571,6 +583,7 @@ public class TestDataNodeHotSwapVolumes {
     final DataNode dn = cluster.getDataNodes().get(dataNodeIdx);
     final FileSystem fs = cluster.getFileSystem();
     final Path testFile = new Path("/test");
+    final long lastTimeDiskErrorCheck = dn.getLastDiskErrorCheck();
 
     FSDataOutputStream out = fs.create(testFile, REPLICATION);
 
@@ -579,6 +592,23 @@ public class TestDataNodeHotSwapVolumes {
     rb.nextBytes(writeBuf);
     out.write(writeBuf);
     out.hflush();
+
+    // Make FsDatasetSpi#finalizeBlock a time-consuming operation. So if the
+    // BlockReceiver releases volume reference before finalizeBlock(), the blocks
+    // on the volume will be removed, and finalizeBlock() throws IOE.
+    final FsDatasetSpi<? extends FsVolumeSpi> data = dn.data;
+    dn.data = Mockito.spy(data);
+    doAnswer(new Answer<Object>() {
+          public Object answer(InvocationOnMock invocation)
+              throws IOException, InterruptedException {
+            Thread.sleep(1000);
+            // Bypass the argument to FsDatasetImpl#finalizeBlock to verify that
+            // the block is not removed, since the volume reference should not
+            // be released at this point.
+            data.finalizeBlock((ExtendedBlock) invocation.getArguments()[0]);
+            return null;
+          }
+        }).when(dn.data).finalizeBlock(any(ExtendedBlock.class));
 
     final CyclicBarrier barrier = new CyclicBarrier(2);
 
@@ -606,13 +636,19 @@ public class TestDataNodeHotSwapVolumes {
     out.hflush();
     out.close();
 
+    reconfigThread.join();
+
     // Verify the file has sufficient replications.
     DFSTestUtil.waitReplication(fs, testFile, REPLICATION);
     // Read the content back
     byte[] content = DFSTestUtil.readFileBuffer(fs, testFile);
     assertEquals(BLOCK_SIZE, content.length);
 
-    reconfigThread.join();
+    // If an IOException thrown from BlockReceiver#run, it triggers
+    // DataNode#checkDiskError(). So we can test whether checkDiskError() is called,
+    // to see whether there is IOException in BlockReceiver#run().
+    assertEquals(lastTimeDiskErrorCheck, dn.getLastDiskErrorCheck());
+
     if (!exceptions.isEmpty()) {
       throw new IOException(exceptions.get(0).getCause());
     }
@@ -667,7 +703,7 @@ public class TestDataNodeHotSwapVolumes {
    * DataNode upon a volume failure. Thus we can run reconfig on the same
    * configuration to reload the new volume on the same directory as the failed one.
    */
-  @Test(timeout=60000)
+  @Test(timeout=120000)
   public void testDirectlyReloadAfterCheckDiskError()
       throws IOException, TimeoutException, InterruptedException,
       ReconfigurationException {
@@ -703,5 +739,40 @@ public class TestDataNodeHotSwapVolumes {
     assertTrue(restoredVolume != failedVolume);
     // More data has been written to this volume.
     assertTrue(restoredVolume.getDfsUsed() > used);
+  }
+
+  /** Test that a full block report is sent after hot swapping volumes */
+  @Test(timeout=100000)
+  public void testFullBlockReportAfterRemovingVolumes()
+      throws IOException, ReconfigurationException, InterruptedException {
+
+    Configuration conf = new Configuration();
+    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, BLOCK_SIZE);
+
+    // Similar to TestTriggerBlockReport, set a really long value for
+    // dfs.heartbeat.interval, so that incremental block reports and heartbeats
+    // won't be sent during this test unless they're triggered
+    // manually.
+    conf.setLong(DFSConfigKeys.DFS_BLOCKREPORT_INTERVAL_MSEC_KEY, 10800000L);
+    conf.setLong(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY, 1080L);
+
+    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
+    cluster.waitActive();
+    //wait for the first blockreport to be finished otherwise the second won't be triguered.
+    Thread.sleep(10000);
+    final DataNode dn = cluster.getDataNodes().get(0);
+    DatanodeProtocolClientSideTranslatorPB spy =
+        DataNodeTestUtils.spyOnBposToNN(dn, cluster.getNameNode());
+
+    // Remove a data dir from datanode
+    File dataDirToKeep = new File(cluster.getDataDirectory(), "data1");
+    dn.reconfigurePropertyImpl(DFS_DATANODE_DATA_DIR_KEY, dataDirToKeep.toString());
+    
+    // We should get 1 full report
+    Mockito.verify(spy, timeout(60000).times(1)).blockReport(
+        any(DatanodeRegistration.class),
+        anyString(),
+        any(StorageBlockReport[].class),
+        any(BlockReportContext.class));
   }
 }
