@@ -31,8 +31,7 @@ import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.apache.hadoop.hdfs.DFSUtil;
 
 import java.io.IOException;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+import java.util.LinkedList;
 import org.apache.hadoop.fs.XAttr;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -327,71 +326,94 @@ public abstract class INodeWithAdditionalFields extends INode {
   }
   
   final static String PROV_PROJECTS = "Projects";
-
+  final static int PROJECT_PARENT = 5;
+  final static int DATASET_PARENT = 4;
+  final static int P1_PARENT = 3;
+  final static int P2_PARENT = 2;
+  final static int P3_PARENT = 1;
+  final static int DIRECT_PARENT = 0;
+  
   public INodeDirectory[] provenanceParents(INode inode) {
     INodeDirectory[] parents = new INodeDirectory[]{null, null, null, null, null, null};
+    LinkedList<INodeDirectory> aux = new LinkedList<>();
+    
     try {
-      parents[0] = inode.getParent();
-      parents[1] = parents[0] != null ? parents[0].getParent() : null;
-      parents[2] = parents[1] != null ? parents[1].getParent() : null;
-      parents[3] = parents[2] != null ? parents[2].getParent() : null;
-      if (parents[0] == null || parents[1] == null) {
-        //(1st level) - not tracking
-        return parents;
-      } else if (parents[2] == null) {
-        //(2nd level) - we only track projects 
-        if (inode instanceof INodeDirectory && PROV_PROJECTS.equals(parents[1].getLocalName())) {
-          parents[5] = (INodeDirectory) inode;
-          return parents;
-        } else {
-          return parents;
-        }
-      } else if (parents[3] == null) {
-        //(3rd level) - we only track datasets 
-        if (inode instanceof INodeDirectory && ((INodeDirectory) inode).isMetaEnabled()) {
-          parents[4] = (INodeDirectory) inode;
-          parents[5] = parents[4].getParent();
-          return parents;
-        } else {
-          return parents;
-        }
-      } else {
-        //(4th+ level) - we only track files/dirs within datasets (meta enabled dirs) 
-        parents[4] = inode.getMetaEnabledParent();
-        if (parents[4] == null) {
-          return parents;
-        }
-        parents[5] = parents[4].getParent();
+      if(isRoot()) {
         return parents;
       }
+      INodeDirectory current = inode.getParent();
+      parents[DIRECT_PARENT] = current;
+      
+      //save the top 5 parents (we need lvl 2,3,4 dirs) - not root(0) or Projects(1)
+      while (!current.isRoot()) {
+        current = current.getParent();
+        aux.add(current);
+        if(aux.size() > PROJECT_PARENT) {
+          aux.removeFirst();
+        }
+      }
+      
+      aux.removeLast(); //drop root
+      //check and drop Projects folder
+      if (!PROV_PROJECTS.equals(aux.removeLast().getLocalName())) { 
+        return parents;
+      }
+      
+      parents[PROJECT_PARENT] = aux.isEmpty() ? null : aux.removeLast();
+      parents[DATASET_PARENT] = aux.isEmpty() ? null : aux.removeLast();
+      if(!parents[DATASET_PARENT].isMetaEnabled()) {
+        parents[DATASET_PARENT] = null;
+        return parents;
+      }
+      parents[P1_PARENT] = aux.isEmpty() ? null : aux.removeLast();
+      parents[P2_PARENT] = aux.isEmpty() ? null : aux.removeLast();
+      parents[P3_PARENT] = aux.isEmpty() ? null : aux.removeLast();
+      return parents;
     } catch (IOException ex) {
       throw new RuntimeException("provenance log error3", ex);
     }
   }
   
+  private boolean isProject(INodeDirectory[] parents) {
+    return parents[DIRECT_PARENT] != null
+      && PROV_PROJECTS.equals(parents[DIRECT_PARENT].getLocalName());
+  }
+  
+  private boolean isDataset(INodeDirectory[] parents) {
+    return parents[DIRECT_PARENT] != null && parents[PROJECT_PARENT] != null  
+      && parents[DIRECT_PARENT].equals(parents[PROJECT_PARENT]) 
+      && isDirectory() && ((INodeDirectory) this).isMetaEnabled();
+  }
+
+  private boolean partOfDataset(INodeDirectory[] parents) {
+    return parents[DATASET_PARENT] != null;
+  }
+  
   @Override
   public void logProvenanceEvent(FileProvenanceEntry.Operation op) {
     INodeDirectory[] parents = provenanceParents(this);
-    //a project, a dataset or within a dataset
-    if(parents[5] != null) {
+    if( isProject(parents) || isDataset(parents) || partOfDataset(parents)) {
       logProvenanceEvent(parents, op, "");
     }
   }
-
+  
   @Override
   public void logProvenanceEvent(FileProvenanceEntry.Operation op, XAttr xattr) {
-    INodeDirectory[] parents = provenanceParents(this);
-    if(parents[5] != null && XAttr.NameSpace.PROVENANCE.equals(xattr.getNameSpace())) {
+    if(XAttr.NameSpace.PROVENANCE.equals(xattr.getNameSpace())) {
+      INodeDirectory[] parents = provenanceParents(this);
       logProvenanceEvent(parents, op, xattr.getName());
     }
   }
-    
-  private void logProvenanceEvent(INodeDirectory[] parents, FileProvenanceEntry.Operation op, String xattrName) {
+  
+  private void logProvenanceEvent(INodeDirectory[] parents, FileProvenanceEntry.Operation op, 
+    String xattrName) {
     UserGroupInformation ugi;
-    int operationUserId;
+    int remoteUserId;
+    String remoteUserName;
     try {
       ugi = NameNode.getRemoteUser();
-      operationUserId = UsersGroups.getUserID(ugi.getUserName());
+      remoteUserId = UsersGroups.getUserID(ugi.getUserName());
+      remoteUserName = ugi.getUserName();
     } catch (IOException ex) {
       throw new RuntimeException("provenance log error1", ex);
     }
@@ -401,21 +423,26 @@ public abstract class INodeWithAdditionalFields extends INode {
     }
     
     long timestamp = System.currentTimeMillis();
-    String inodeName = getLocalName(); 
-    long p1 = parents[0] != null ? parents[0].getId() : 0;
-    long p2 = parents[1] != null ? parents[1].getId() : 0;
-    long p3 = parents[2] != null ? parents[2].getId() : 0;
-    String datasetName = "";
+    String inodeName = getLocalName();
+    long projectId = 0;
+    String projectName = "";
+    if(parents[PROJECT_PARENT] != null) {
+      projectId = parents[PROJECT_PARENT].getId();
+      projectName = parents[PROJECT_PARENT].getLocalName();
+    }
     long datasetId = 0;
+    String datasetName = "";
     if(parents[4] != null) {
       datasetId = parents[4].getId();
       datasetName = parents[4].getLocalName();
     }
-    long projectId = parents[5].getId();
-    String projectName = parents[5].getLocalName();
-    FileProvenanceEntry ple = new FileProvenanceEntry(id, op, logicalTime, timestamp, appId, operationUserId,
-      partitionId, p1, p2, p3, datasetId, projectId, inodeName, datasetName, projectName, xattrName, 
-      logicalTime, timestamp);
+    String p1 = parents[P1_PARENT] != null ? parents[P1_PARENT].getLocalName() : "";
+    String p2 = parents[P2_PARENT] != null ? parents[P2_PARENT].getLocalName() : "";
+    String p3 = parents[P3_PARENT] != null ? parents[P3_PARENT].getLocalName() : "";
+    
+    FileProvenanceEntry ple = new FileProvenanceEntry(id, op, logicalTime, timestamp, appId, remoteUserId,
+      partitionId, projectId, datasetId, inodeName, projectName, datasetName, p1, p2, p3, remoteUserName,
+      xattrName, logicalTime, timestamp);
     try {
       EntityManager.add(ple);
     } catch (IOException ex) {
