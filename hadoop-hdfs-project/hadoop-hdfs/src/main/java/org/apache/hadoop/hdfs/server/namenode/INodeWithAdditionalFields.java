@@ -438,12 +438,13 @@ public abstract class INodeWithAdditionalFields extends INode {
       datasetId = parents[4].getId();
       datasetName = parents[4].getLocalName();
     }
+    long parentId = parents[DIRECT_PARENT].getId();
     String p1 = parents[P1_PARENT] != null ? parents[P1_PARENT].getLocalName() : "";
     String p2 = parents[P2_PARENT] != null ? parents[P2_PARENT].getLocalName() : "";
     String p3 = parents[P3_PARENT] != null ? parents[P3_PARENT].getLocalName() : "";
     
     FileProvenanceEntry ple = new FileProvenanceEntry(id, op, logicalTime, timestamp, appId, remoteUserId,
-      partitionId, projectId, datasetId, inodeName, projectName, datasetName, p1, p2, p3, remoteUserName,
+      partitionId, projectId, datasetId, parentId, inodeName, projectName, datasetName, p1, p2, p3, remoteUserName,
       xattrName, logicalTime, timestamp);
     try {
       EntityManager.add(ple);
