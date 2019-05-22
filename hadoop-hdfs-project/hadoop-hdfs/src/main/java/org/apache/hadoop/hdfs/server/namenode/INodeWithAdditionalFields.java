@@ -352,7 +352,9 @@ public abstract class INodeWithAdditionalFields extends INode {
           aux.removeFirst();
         }
       }
-      
+      if(aux.size() <= 2) {
+        return parents;
+      }
       aux.removeLast(); //drop root
       //check and drop Projects folder
       if (!PROV_PROJECTS.equals(aux.removeLast().getLocalName())) { 
