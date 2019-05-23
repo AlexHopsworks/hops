@@ -355,15 +355,20 @@ public abstract class INodeWithAdditionalFields extends INode {
       if(aux.size() <= 2) {
         return parents;
       }
-      aux.removeLast(); //drop root
+      //drop root
+      aux.removeLast();
       //check and drop Projects folder
       if (!PROV_PROJECTS.equals(aux.removeLast().getLocalName())) { 
         return parents;
       }
-      
+      //check project
       parents[PROJECT_PARENT] = aux.isEmpty() ? null : aux.removeLast();
+      if(parents[PROJECT_PARENT] == null) {
+        return parents;
+      }
+      //check dataset
       parents[DATASET_PARENT] = aux.isEmpty() ? null : aux.removeLast();
-      if(!parents[DATASET_PARENT].isMetaEnabled()) {
+      if(parents[DATASET_PARENT] == null || !parents[DATASET_PARENT].isMetaEnabled()) {
         parents[DATASET_PARENT] = null;
         return parents;
       }
