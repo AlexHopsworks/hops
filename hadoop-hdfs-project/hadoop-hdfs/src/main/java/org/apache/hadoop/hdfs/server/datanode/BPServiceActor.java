@@ -32,15 +32,7 @@ import org.apache.hadoop.hdfs.protocol.UnregisteredNodeException;
 import org.apache.hadoop.hdfs.protocolPB.DatanodeProtocolClientSideTranslatorPB;
 import org.apache.hadoop.hdfs.server.common.IncorrectVersionException;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
-import org.apache.hadoop.hdfs.server.protocol.DatanodeCommand;
-import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
-import org.apache.hadoop.hdfs.server.protocol.DisallowedDatanodeException;
-import org.apache.hadoop.hdfs.server.protocol.HeartbeatResponse;
-import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
-import org.apache.hadoop.hdfs.server.protocol.StorageBlockReport;
-import org.apache.hadoop.hdfs.server.protocol.StorageReceivedDeletedBlocks;
-import org.apache.hadoop.hdfs.server.protocol.StorageReport;
-import org.apache.hadoop.hdfs.server.protocol.VolumeFailureSummary;
+import org.apache.hadoop.hdfs.server.protocol.*;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.util.Time;
@@ -53,7 +45,6 @@ import java.net.SocketTimeoutException;
 import java.util.Collection;
 import java.util.List;
 import org.apache.hadoop.hdfs.protocol.RollingUpgradeStatus;
-import org.apache.hadoop.hdfs.server.protocol.BlockReportContext;
 
 import static org.apache.hadoop.util.Time.now;
 
@@ -379,6 +370,9 @@ class BPServiceActor implements Runnable {
           if (!dn.areHeartbeatsDisabledForTests()) {
             HeartbeatResponse resp = sendHeartBeat();
             assert resp != null;
+
+            connectedToNN = true;
+
             dn.getMetrics().addHeartbeat(now() - startTime);
 
             handleRollingUpgradeStatus(resp);
@@ -407,8 +401,6 @@ class BPServiceActor implements Runnable {
           waitForHeartBeats.wait(waitTime);
         }
 
-        // no exceptions so
-        connectedToNN = true;
       } catch (RemoteException re) {
         String reClass = re.getClassName();
         if (UnregisteredNodeException.class.getName().equals(reClass) ||
@@ -478,7 +470,12 @@ class BPServiceActor implements Runnable {
     // random short delay - helps scatter the BR from all DNs
     // block report only if the datanode is not already connected
     // to any other namenode.
-    if(!bpos.otherActorsConnectedToNNs(this)) {
+    // In case of multiple actors (Multi NN)  we would like to 
+    // send only one BR. 
+    // potential race condition here. multiple actor might see that
+    // none of the other actors are yet connected. to avoid such
+    // scenarios we ask the first actor to do BR
+    if(!bpos.otherActorsConnectedToNNs(this) && bpos.firstActor(this)) {
       bpos.scheduleBlockReport(dnConf.initialBlockReportDelay);
     } else {
       LOG.info("Block Report skipped as other BPServiceActors are connected to the namenodes ");
@@ -642,13 +639,18 @@ class BPServiceActor implements Runnable {
     }
   }
 
+  public DatanodeCommand reportHashes(DatanodeRegistration registration,
+                                     String poolId, StorageBlockReport[] reports) throws IOException {
+    return bpNamenode.reportHashes(registration, poolId, reports);
+  }
+
   public DatanodeCommand blockReport(DatanodeRegistration registration,
       String poolId, StorageBlockReport[] reports, BlockReportContext context) throws IOException {
     return bpNamenode.blockReport(registration, poolId, reports, context);
   }
 
-  public void blockReportCompleted(DatanodeRegistration registration) throws IOException {
-    bpNamenode.blockReportCompleted(registration);
+  public void blockReportCompleted(DatanodeRegistration registration, DatanodeStorage[] storages) throws IOException {
+    bpNamenode.blockReportCompleted(registration, storages);
   }
 
   public DatanodeCommand cacheReport(DatanodeRegistration bpRegistration,

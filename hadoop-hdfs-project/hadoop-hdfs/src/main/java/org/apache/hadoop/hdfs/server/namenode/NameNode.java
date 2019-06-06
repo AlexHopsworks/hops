@@ -311,6 +311,11 @@ public class NameNode implements NameNodeStatusMXBean {
     return namesystem;
   }
 
+  @VisibleForTesting
+  public void setNamesystem(FSNamesystem fsNamesystem) {
+    this.namesystem = fsNamesystem;
+  }
+
   public NamenodeProtocols getRpcServer() {
     return rpcServer;
   }
@@ -680,17 +685,23 @@ public class NameNode implements NameNodeStatusMXBean {
   }
 
   private void stopCommonServices() {
+    if (leaderElection != null && leaderElection.isRunning()) {
+      try {
+        leaderElection.stopElectionThread();
+      } catch (InterruptedException e) {
+        LOG.warn("LeaderElection thread stopped",e);
+      }
+    }
+
     if (rpcServer != null) {
       rpcServer.stop();
     }
     if (namesystem != null) {
       namesystem.close();
     }
-    if (pauseMonitor != null) pauseMonitor.stop();
-    if (leaderElection != null && leaderElection.isRunning()) {
-      leaderElection.stopElectionThread();
+    if (pauseMonitor != null) {
+      pauseMonitor.stop();
     }
-
     if(mdCleaner != null){
       mdCleaner.stopMDCleanerMonitor();
     }
@@ -1331,11 +1342,6 @@ public class NameNode implements NameNodeStatusMXBean {
     }
   }
 
-  public void blockReportCompleted(final DatanodeID nodeID) throws
-          IOException {
-    brTrackingService.blockReportCompleted(nodeID.getXferAddr());
-  }
-
   private static void dropAndCreateDB(Configuration conf) throws IOException {
     HdfsStorageFactory.setConfiguration(conf);
     HdfsStorageFactory.getConnector().dropAndRecreateDB();
@@ -1434,6 +1440,15 @@ public class NameNode implements NameNodeStatusMXBean {
    */
   boolean isStarted() {
     return this.started.get();
+  }
+
+  public BRTrackingService getBRTrackingService(){
+    return brTrackingService;
+  }
+
+  @VisibleForTesting
+  NameNodeRpcServer getNameNodeRpcServer(){
+    return rpcServer;
   }
 }
 

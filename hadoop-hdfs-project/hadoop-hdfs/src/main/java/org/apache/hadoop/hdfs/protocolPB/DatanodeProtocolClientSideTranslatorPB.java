@@ -45,19 +45,10 @@ import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.RegisterData
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.ReportBadBlocksRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.StorageBlockReportProto;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.StorageReceivedDeletedBlocksProto;
+import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.VersionRequestProto;
-import org.apache.hadoop.hdfs.server.protocol.BlockReportContext;
-import org.apache.hadoop.hdfs.server.protocol.DatanodeCommand;
-import org.apache.hadoop.hdfs.server.protocol.DatanodeProtocol;
-import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
-import org.apache.hadoop.hdfs.server.protocol.HeartbeatResponse;
-import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
+import org.apache.hadoop.hdfs.server.protocol.*;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo.Capability;
-import org.apache.hadoop.hdfs.server.protocol.ReceivedDeletedBlockInfo;
-import org.apache.hadoop.hdfs.server.protocol.StorageBlockReport;
-import org.apache.hadoop.hdfs.server.protocol.StorageReceivedDeletedBlocks;
-import org.apache.hadoop.hdfs.server.protocol.StorageReport;
-import org.apache.hadoop.hdfs.server.protocol.VolumeFailureSummary;
 import org.apache.hadoop.ipc.ProtobufHelper;
 import org.apache.hadoop.ipc.ProtobufRpcEngine;
 import org.apache.hadoop.ipc.ProtocolMetaInterface;
@@ -180,10 +171,10 @@ public class DatanodeProtocolClientSideTranslatorPB
     BlockReportRequestProto.Builder builder = BlockReportRequestProto
         .newBuilder().setRegistration(PBHelper.convert(registration))
         .setBlockPoolId(poolId);
-    
+
     boolean useBlocksBuffer = registration.getNamespaceInfo()
         .isCapabilitySupported(Capability.STORAGE_BLOCK_REPORT_BUFFERS);
-    
+
     for (StorageBlockReport r : reports) {
       StorageBlockReportProto.Builder reportBuilder =
           StorageBlockReportProto.newBuilder()
@@ -200,6 +191,34 @@ public class DatanodeProtocolClientSideTranslatorPB
     }
     return resp.hasCmd() ? PBHelper.convert(resp.getCmd()) : null;
   }
+
+  @Override
+  public DatanodeCommand reportHashes(DatanodeRegistration registration,
+                                     String poolId, StorageBlockReport[] reports) throws IOException {
+    BlockReportRequestProto.Builder builder =
+            BlockReportRequestProto.newBuilder()
+                    .setRegistration(PBHelper.convert(registration))
+                    .setBlockPoolId(poolId);
+
+    boolean useBlocksBuffer = registration.getNamespaceInfo()
+            .isCapabilitySupported(Capability.STORAGE_BLOCK_REPORT_BUFFERS);
+
+    for (StorageBlockReport r : reports) {
+      StorageBlockReportProto.Builder reportBuilder =
+              StorageBlockReportProto.newBuilder()
+                      .setStorage(PBHelper.convert(r.getStorage()))
+                      .setReport(PBHelper.convert(r.getReport(), useBlocksBuffer));
+      builder.addReports(reportBuilder.build());
+    }
+    BlockReportResponseProto resp;
+    try {
+      resp = rpcProxy.reportHashes(NULL_CONTROLLER, builder.build());
+    } catch (ServiceException se) {
+      throw ProtobufHelper.getRemoteException(se);
+    }
+    return resp.hasCmd() ? PBHelper.convert(resp.getCmd()) : null;
+  }
+
 
   @Override
   public DatanodeCommand cacheReport(DatanodeRegistration registration,
@@ -353,11 +372,16 @@ public class DatanodeProtocolClientSideTranslatorPB
   }
 
   @Override
-  public void blockReportCompleted(DatanodeRegistration nodeReg) throws IOException {
+  public void blockReportCompleted(DatanodeRegistration nodeReg, DatanodeStorage[] storages) throws IOException {
 
     BlockReportCompletedRequestProto.Builder request =
                 BlockReportCompletedRequestProto.newBuilder();
     request.setRegistration(PBHelper.convert(nodeReg));
+    for(int i = 0; i < storages.length; i++){
+      HdfsProtos.DatanodeStorageProto.Builder dnsb = HdfsProtos.DatanodeStorageProto.newBuilder();
+      request.addStorages(PBHelper.convert(storages[i]));
+    }
+
     try {
       rpcProxy.blockReportCompleted (NULL_CONTROLLER, request.build());
       return;

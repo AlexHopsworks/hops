@@ -6,55 +6,41 @@
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
+ * <p>
+ * http://www.apache.org/licenses/LICENSE-2.0
+ * <p>
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.hadoop.hdfs.server.protocol;
+package org.apache.hadoop.ipc;
 
-import org.apache.hadoop.hdfs.protocol.BlockListAsLongs;
+import java.util.concurrent.TimeUnit;
 
-public class Bucket {
+public final class TimeWatch {
+  private long start;
   
-  private BlockListAsLongs blocks;
-
-  private byte[] hash;
-
-  private boolean skip = false; // skip processing the bucket
-  
-  public Bucket(){}
-  
-  public Bucket(BlockListAsLongs blocks){
-    this.blocks = blocks;
-  }
-
-  public void setBlocks(BlockListAsLongs blocks) {
-    this.blocks = blocks;
+  private TimeWatch() {
+    reset();
   }
   
-  public BlockListAsLongs getBlocks() {
-    return blocks;
+  public static TimeWatch start() {
+    return new TimeWatch();
   }
-
-  public void setHash(byte[] hash){
-    this.hash = hash;
+  
+  public TimeWatch reset() {
+    start = System.nanoTime();
+    return this;
   }
-
-  public byte[] getHash(){
-    return hash;
+  
+  public long elapsed() {
+    long now = System.nanoTime();
+    return now - start;
   }
-
-  public boolean isSkip() {
-    return skip;
-  }
-
-  public void setSkip(boolean skip) {
-    this.skip = skip;
+  
+  public long elapsedIn(TimeUnit unit) {
+    return unit.convert(elapsed(), TimeUnit.NANOSECONDS);
   }
 }
-

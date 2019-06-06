@@ -97,6 +97,7 @@ import org.apache.hadoop.hdfs.server.protocol.StorageBlockReport;
 import org.apache.hadoop.hdfs.server.protocol.StorageReceivedDeletedBlocks;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
 import org.apache.hadoop.hdfs.server.protocol.VolumeFailureSummary;
+import org.apache.hadoop.hdfs.server.protocol.*;
 import org.apache.hadoop.io.EnumSetWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.ipc.ProtobufRpcEngine;
@@ -182,7 +183,7 @@ class NameNodeRpcServer implements NamenodeProtocols {
       .blockStateChangeLog;
   
   // Dependencies from other parts of NN.
-  protected final FSNamesystem namesystem;
+  protected FSNamesystem namesystem;
   protected final NameNode nn;
   private final NameNodeMetrics metrics;
   
@@ -1095,6 +1096,27 @@ class NameNodeRpcServer implements NamenodeProtocols {
     }
   }
 
+  @Override // DatanodeProtocol
+  public DatanodeCommand reportHashes(DatanodeRegistration nodeReg,
+                                     String poolId, StorageBlockReport[] reports) throws IOException {
+    checkNNStartup();
+    verifyRequest(nodeReg);
+    if (blockStateChangeLog.isDebugEnabled()) {
+      blockStateChangeLog.debug("*BLOCK* NameNode.reportHashes: from " + nodeReg +
+                      ", reports.length=" + reports.length);
+    }
+
+    HashesMismatchCommand hmc = new HashesMismatchCommand();
+    final BlockManager bm = namesystem.getBlockManager();
+    for(StorageBlockReport r : reports) {
+      final BlockReport blocks = r.getReport();
+      List<Integer> mb = bm.checkHashes(nodeReg, r.getStorage(), blocks);
+      hmc.addStorageBuckets(r.getStorage().getStorageID(), mb);
+    }
+
+    return hmc;
+  }
+
   @Override
   public DatanodeCommand cacheReport(DatanodeRegistration nodeReg,
       String poolId, List<Long> blockIds, long cacheCapacity, long cacheUsed) throws IOException {
@@ -1309,8 +1331,8 @@ class NameNodeRpcServer implements NamenodeProtocols {
   }
 
   @Override
-  public void blockReportCompleted(DatanodeRegistration nodeReg) throws IOException {
-    nn.blockReportCompleted(nodeReg);
+  public void blockReportCompleted(DatanodeRegistration nodeReg, DatanodeStorage[] storages) throws IOException {
+    namesystem.getBlockManager().blockReportCompleted(nodeReg, storages);
   }
 
   @Override
@@ -1632,5 +1654,10 @@ class NameNodeRpcServer implements NamenodeProtocols {
   @Override
   public void removeXAttr(String src, XAttr xAttr) throws IOException {
     namesystem.removeXAttr(src, xAttr);
+  }
+
+  @VisibleForTesting
+  void setFSNamesystem(FSNamesystem fsn){
+    namesystem = fsn;
   }
 }
