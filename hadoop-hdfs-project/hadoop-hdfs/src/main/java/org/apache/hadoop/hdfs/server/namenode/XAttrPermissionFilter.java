@@ -53,7 +53,8 @@ public class XAttrPermissionFilter {
       throws AccessControlException {
     if (xAttr.getNameSpace() == XAttr.NameSpace.USER || 
         (xAttr.getNameSpace() == XAttr.NameSpace.TRUSTED && 
-        pc.isSuperUser())) {
+        pc.isSuperUser())
+        || XAttr.NameSpace.PROVENANCE.equals(xAttr.getNameSpace())) {
       return;
     }
     throw new AccessControlException("User doesn't have permission for xattr: "
@@ -69,7 +70,8 @@ public class XAttrPermissionFilter {
     
     List<XAttr> filteredXAttrs = Lists.newArrayListWithCapacity(xAttrs.size());
     for (XAttr xAttr : xAttrs) {
-      if (xAttr.getNameSpace() == XAttr.NameSpace.USER) {
+      if (xAttr.getNameSpace() == XAttr.NameSpace.USER
+        || XAttr.NameSpace.PROVENANCE.equals(xAttr.getNameSpace())) {
         filteredXAttrs.add(xAttr);
       } else if (xAttr.getNameSpace() == XAttr.NameSpace.TRUSTED && 
           pc.isSuperUser()) {

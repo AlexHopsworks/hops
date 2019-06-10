@@ -20,7 +20,9 @@ package org.apache.hadoop.hdfs.server.namenode;
 import io.hops.exception.StorageException;
 import io.hops.exception.TransactionContextException;
 import io.hops.metadata.hdfs.entity.INodeIdentifier;
+import io.hops.metadata.hdfs.entity.FileProvenanceEntry;
 import io.hops.metadata.hdfs.entity.INodeMetadataLogEntry;
+import io.hops.metadata.hdfs.entity.MetaStatus;
 import io.hops.transaction.EntityManager;
 
 import java.io.FileNotFoundException;
@@ -37,8 +39,6 @@ import org.apache.hadoop.hdfs.server.blockmanagement.BlockStoragePolicySuite;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
-
-import static org.apache.hadoop.hdfs.server.blockmanagement.BlockStoragePolicySuite.ID_UNSPECIFIED;
 
 /**
  * Directory INode class.
@@ -66,7 +66,7 @@ public class INodeDirectory extends INodeWithAdditionalFields {
   public static final long ROOT_DIR_PARTITION_KEY = ROOT_PARENT_ID;
   public static final short ROOT_DIR_DEPTH =0;
 
-  private boolean metaEnabled;
+  private MetaStatus metaStatus = MetaStatus.DISABLED;
 
   private int childrenNum;
   
@@ -111,7 +111,7 @@ public class INodeDirectory extends INodeWithAdditionalFields {
     if (copyFeatures) {
       this.features = other.features;
     }
-    this.metaEnabled = other.isMetaEnabled();
+    this.metaStatus = other.getMetaStatus();
   }
   
   /**
@@ -219,11 +219,14 @@ public class INodeDirectory extends INodeWithAdditionalFields {
   }
 
   public boolean isMetaEnabled() {
-    return metaEnabled;
+    return metaStatus.isMetaEnabled();
   }
-
-  public void setMetaEnabled(boolean metaEnabled) {
-    this.metaEnabled = metaEnabled;
+  
+  public MetaStatus getMetaStatus() {
+    return metaStatus;
+  }
+  public void setMetaStatus(MetaStatus metaStatus) {
+    this.metaStatus = metaStatus;
   }
 
   public boolean removeChild(INode node)
@@ -469,6 +472,7 @@ public class INodeDirectory extends INodeWithAdditionalFields {
     if (logMetadataEvent) {
       node.logMetadataEvent(INodeMetadataLogEntry.Operation.Add);
     }
+    node.logProvenanceEvent(FileProvenanceEntry.Operation.create());
 
     return true;
   }

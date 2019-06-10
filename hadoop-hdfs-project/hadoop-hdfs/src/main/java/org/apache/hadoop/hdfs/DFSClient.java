@@ -85,6 +85,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import io.hops.metadata.hdfs.entity.MetaStatus;
 import org.apache.hadoop.ipc.ProtocolTranslator;
 import org.apache.hadoop.net.StandardSocketFactory;
 import org.apache.hadoop.util.Daemon;
@@ -3032,10 +3033,10 @@ public class DFSClient implements java.io.Closeable, RemotePeerFactory,
     }
   }
 
-  public void setMetaEnabled(final String src, final boolean metaEnabled)
+  public void setMetaStatus(final String src, final MetaStatus metaStatus)
           throws IOException {
-    try (TraceScope ignored = tracer.newScope("setMetaEnabled")) {
-          namenode.setMetaEnabled(src, metaEnabled);
+    try (TraceScope ignored = tracer.newScope("setMetaStatus")) {
+          namenode.setMetaStatus(src, metaStatus);
     } catch (RemoteException re) {
       throw re.unwrapRemoteException(AccessControlException.class,
               FileNotFoundException.class, SafeModeException.class,
