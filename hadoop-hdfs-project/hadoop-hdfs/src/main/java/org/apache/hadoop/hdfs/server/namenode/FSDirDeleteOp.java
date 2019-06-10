@@ -22,6 +22,7 @@ import io.hops.exception.TransactionContextException;
 import io.hops.metadata.hdfs.entity.INodeIdentifier;
 import io.hops.metadata.hdfs.entity.INodeMetadataLogEntry;
 import io.hops.metadata.hdfs.entity.ProjectedINode;
+import io.hops.metadata.hdfs.entity.FileProvenanceEntry;
 import io.hops.metadata.hdfs.entity.SubTreeOperation;
 import io.hops.transaction.handler.HDFSOperationType;
 import io.hops.transaction.handler.HopsTransactionalRequestHandler;
@@ -467,9 +468,11 @@ class FSDirDeleteOp {
          addMetaDataLogForDirDeletion(child);
        }else{
          child.logMetadataEvent(INodeMetadataLogEntry.Operation.Delete);
+         child.logProvenanceEvent(FileProvenanceEntry.Operation.delete());
        }
       }
     }
     targetNode.logMetadataEvent(INodeMetadataLogEntry.Operation.Delete);
+    targetNode.logProvenanceEvent(FileProvenanceEntry.Operation.delete());
   }
 }

@@ -83,6 +83,7 @@ import io.hops.metadata.hdfs.entity.Replica;
 import io.hops.metadata.hdfs.entity.InvalidatedBlock;
 import io.hops.metadata.hdfs.entity.LeasePath;
 import io.hops.metadata.hdfs.entity.MetadataLogEntry;
+import io.hops.metadata.hdfs.entity.FileProvenanceEntry;
 import io.hops.metadata.hdfs.entity.QuotaUpdate;
 import io.hops.metadata.hdfs.entity.RetryCacheEntry;
 import io.hops.metadata.hdfs.entity.SubTreeOperation;
@@ -109,6 +110,7 @@ import io.hops.transaction.context.LeaseContext;
 import io.hops.transaction.context.LeasePathContext;
 import io.hops.transaction.context.MetadataLogContext;
 import io.hops.transaction.context.PendingBlockContext;
+import io.hops.transaction.context.FileProvenanceContext;
 import io.hops.transaction.context.QuotaUpdateContext;
 import io.hops.transaction.context.ReplicaContext;
 import io.hops.transaction.context.ReplicaUnderConstructionContext;
@@ -146,7 +148,11 @@ import org.apache.hadoop.hdfs.protocol.CacheDirective;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoContiguous;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoContiguousUnderConstruction;
 import org.apache.hadoop.hdfs.server.namenode.CachePool;
+import io.hops.metadata.hdfs.dal.FileProvenanceDataAccess;
 import io.hops.metadata.hdfs.dal.DirectoryWithQuotaFeatureDataAccess;
+import io.hops.metadata.hdfs.dal.FileProvXAttrBufferDataAccess;
+import io.hops.metadata.hdfs.entity.FileProvXAttrBufferEntry;
+import io.hops.transaction.context.FileProvXAttrBufferContext;
 import org.apache.hadoop.hdfs.server.namenode.DirectoryWithQuotaFeature;
 
 public class HdfsStorageFactory {
@@ -355,6 +361,10 @@ public class HdfsStorageFactory {
             (CachedBlockDataAccess) getDataAccess(CachedBlockDataAccess.class)));
         entityContexts.put(StoredXAttr.class,
             new XAttrContext((XAttrDataAccess)getDataAccess(XAttrDataAccess.class)));
+        entityContexts.put(FileProvenanceEntry.class, new FileProvenanceContext(
+            (FileProvenanceDataAccess) getDataAccess(FileProvenanceDataAccess.class)));
+        entityContexts.put(FileProvXAttrBufferEntry.class, new FileProvXAttrBufferContext(
+            (FileProvXAttrBufferDataAccess) getDataAccess(FileProvXAttrBufferDataAccess.class)));
         return entityContexts;
       }
 

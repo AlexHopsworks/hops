@@ -26,6 +26,7 @@ import io.hops.metadata.common.FinderType;
 import io.hops.metadata.hdfs.entity.EncodingStatus;
 import io.hops.metadata.hdfs.entity.INodeIdentifier;
 import io.hops.metadata.hdfs.entity.INodeMetadataLogEntry;
+import io.hops.metadata.hdfs.entity.FileProvenanceEntry;
 import io.hops.transaction.EntityManager;
 import java.io.FileNotFoundException;
 import java.io.PrintStream;
@@ -50,6 +51,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import org.apache.hadoop.fs.XAttr;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
 import org.apache.hadoop.hdfs.util.ChunkedArrayList;
 import org.apache.hadoop.util.LightWeightGSet.LinkedElement;
@@ -930,6 +932,8 @@ public abstract class INode implements Comparable<byte[]>, LinkedElement {
     return null;
   }
 
+  public abstract void logProvenanceEvent(FileProvenanceEntry.Operation op);
+  public abstract void logProvenanceEvent(FileProvenanceEntry.Operation op, XAttr xattr);
   public abstract Long getPartitionId();
 
   public abstract void setPartitionIdNoPersistance(long partitionId);

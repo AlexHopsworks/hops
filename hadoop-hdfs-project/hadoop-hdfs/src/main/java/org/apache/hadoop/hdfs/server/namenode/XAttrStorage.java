@@ -24,6 +24,7 @@ import java.util.List;
 import com.google.common.collect.Lists;
 import io.hops.exception.StorageException;
 import io.hops.exception.TransactionContextException;
+import io.hops.metadata.hdfs.entity.FileProvenanceEntry;
 import io.hops.metadata.hdfs.entity.StoredXAttr;
 import io.hops.metadata.hdfs.entity.XAttrMetadataLogEntry;
 import io.hops.transaction.EntityManager;
@@ -83,8 +84,10 @@ public class XAttrStorage {
     
     if(!xAttrExists) {
       logMetadataEvent(inode, xAttr, XAttrMetadataLogEntry.Operation.Add);
+      inode.logProvenanceEvent(FileProvenanceEntry.Operation.XATTR_ADD, xAttr);
     }else{
       logMetadataEvent(inode, xAttr, XAttrMetadataLogEntry.Operation.Update);
+      inode.logProvenanceEvent(FileProvenanceEntry.Operation.XATTR_UPDATE, xAttr);
     }
   }
   
@@ -98,6 +101,7 @@ public class XAttrStorage {
     XAttrFeature f = getXAttrFeature(inode);
     f.removeXAttr(xAttr);
     logMetadataEvent(inode, xAttr, XAttrMetadataLogEntry.Operation.Delete);
+    inode.logProvenanceEvent(FileProvenanceEntry.Operation.XATTR_DELETE, xAttr);
   }
   
   private static XAttrFeature getXAttrFeature(INode inode){
@@ -156,19 +160,27 @@ public class XAttrStorage {
   private static void logMetadataEvent(INode inode, XAttr attr,
       XAttrMetadataLogEntry.Operation operation)
       throws TransactionContextException, StorageException {
-
-    if(inode.isPathMetaEnabled()) {
-      long datasetId = inode.getMetaEnabledParent().getId();
-      long inodeId = inode.getId();
-      int logicaltime = inode.incrementLogicalTime();
-      inode.save();
-      
   
-      XAttrMetadataLogEntry logEntry = new XAttrMetadataLogEntry(datasetId,
-          inodeId, logicaltime, attr.getNameSpace().getId(), attr.getName(),
-          operation);
-  
-      EntityManager.add(logEntry);
+    long datasetId;
+    if(inode instanceof INodeDirectory && ((INodeDirectory)inode).isMetaEnabled()) {
+      datasetId = inode.getId();
+    } else if(inode.isPathMetaEnabled()) {
+      datasetId = inode.getMetaEnabledParent().getId();
+    } else  {
+      return;
     }
+    if(inode.getPartitionId() == null){
+      throw new RuntimeException("Trying to log metadata for an inode that " +
+        "wasn't commited to the database");
+    }
+  
+    long inodeId = inode.getId();;
+    int logicalTime = inode.incrementLogicalTime();
+    inode.save();
+    
+    XAttrMetadataLogEntry logEntry = new XAttrMetadataLogEntry(datasetId,
+      inodeId, logicalTime, attr.getNameSpace().getId(), attr.getName(),
+      operation);
+    EntityManager.add(logEntry);
   }
 }

@@ -1290,6 +1290,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
         }
       }
     }
+    inodeFile.logProvenanceEvent(FileProvenanceEntry.Operation.getBlockLocations());
     return ret;
   }
 
@@ -1450,7 +1451,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     return success;
   }
 
-  void setMetaEnabled(final String srcArg, final boolean metaEnabled)
+  void setMetaStatus(final String srcArg, final MetaStatus metaStatus)
       throws IOException {
     byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(srcArg);
     final String src = dir.resolvePath(srcArg, pathComponents, dir);
@@ -1459,7 +1460,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       //we just want to lock the subtree, the access check is done in the perform task.
       stoRootINode = lockSubtree(src, SubTreeOperation.Type.META_ENABLE_STO);
       final AbstractFileTree.FileTree fileTree = buildTreeForLogging(stoRootINode,
-          metaEnabled);
+          metaStatus.isMetaEnabled());
       new HopsTransactionalRequestHandler(HDFSOperationType.SET_META_ENABLED,
           src) {
         @Override
@@ -1480,7 +1481,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
             FSPermissionChecker pc = getPermissionChecker();
             final INodesInPath iip = dir.getINodesInPath4Write(src);
             dir.checkPathAccess(pc, iip, FsAction.WRITE);
-            setMetaEnabledInt(src, fileTree, metaEnabled);
+            setMetaStatusInt(src, fileTree, metaStatus);
           } catch (AccessControlException e) {
             logAuditEvent(false, "setMetaEnabled", src);
             throw e;
@@ -1506,8 +1507,8 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     return fileTree;
   }
   
-  private void setMetaEnabledInt(final String src,
-      final AbstractFileTree.FileTree fileTree, final boolean metaEnabled)
+  private void setMetaStatusInt(final String src,
+      final AbstractFileTree.FileTree fileTree, final MetaStatus metaStatus)
       throws IOException {
     checkNameNodeSafeMode("Cannot set metaEnabled for " + src);
 
@@ -1516,11 +1517,11 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       throw new FileNotFoundException(src + ": Is not a directory");
     } else {
       INodeDirectory dirNode = (INodeDirectory) targetNode;
-      dirNode.setMetaEnabled(metaEnabled);
+      dirNode.setMetaStatus(metaStatus);
       EntityManager.update(dirNode);
     }
   
-    if(metaEnabled) {
+    if(metaStatus.isMetaEnabled()) {
       logMetadataEvents(fileTree,
           INodeMetadataLogEntry.Operation.Add);
     }
@@ -3777,6 +3778,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     // close file and persist block allocations for this file
     pendingFile.toCompleteFile(now());
     closeFile(src, pendingFile);
+    pendingFile.logProvenanceEvent(FileProvenanceEntry.Operation.append());
 
     if (!skipReplicationChecks) {
       blockManager.checkReplication(pendingFile);

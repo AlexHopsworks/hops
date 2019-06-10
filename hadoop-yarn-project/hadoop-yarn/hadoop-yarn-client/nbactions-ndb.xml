@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<actions>
+        <action>
+            <actionName>test.single</actionName>
+            <packagings>
+                <packaging>*</packaging>
+            </packagings>
+            <goals>
+                <goal>test-compile</goal>
+                <goal>surefire:test</goal>
+            </goals>
+            <properties>
+                <test>${packageClassName}</test>
+                <Env.LIBNDBPATH>/usr/local/mysql/lib</Env.LIBNDBPATH>
+                <Env.DYLD_LIBRARY_PATH>/usr/local/mysql/lib</Env.DYLD_LIBRARY_PATH>
+                <Env.LD_LIBRARY_PATH>/usr/local/lib</Env.LD_LIBRARY_PATH>
+                <Env.PATH>/usr/local/opt/protobuf@2.5/bin:/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</Env.PATH>
+            </properties>
+        </action>
+    </actions>

@@ -854,4 +854,14 @@ public class DFSConfigKeys extends CommonConfigurationKeys {
   //Availability zones
   public static final String  DFS_LOCATION_DOMAIN_ID = "dfs.locationDomainId";
   public static final byte    DFS_LOCATION_DOMAIN_ID_DEFAULT = 0;
+
+  public static final String DFS_HDFS_PROVENANCE_ENABLED =
+      "dfs.namenode.hdfs-provenance.enabled";
+  public static final boolean DFS_HDFS_PROVENANCE_ENABLED_DEFAULT = true;
+  public static final String DFS_HDFS_PROVENANCE_BATCH_ENABLED =
+      "dfs.namenode.hdfs-provenance-batch.enabled";
+  public static final boolean DFS_HDFS_PROVENANCE_BATCH_ENABLED_DEFAULT = true;
+  public static final String DFS_HDFS_PROVENANCE_DETAIL_ENABLED =
+      "dfs.namenode.hdfs-provenance-detail.enabled";
+  public static final boolean DFS_HDFS_PROVENANCE_DETAIL_ENABLED_DEFAULT = true;
 }
