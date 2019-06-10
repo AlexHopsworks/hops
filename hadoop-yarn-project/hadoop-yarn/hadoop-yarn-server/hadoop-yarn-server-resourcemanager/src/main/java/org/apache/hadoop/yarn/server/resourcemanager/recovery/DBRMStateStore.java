@@ -435,8 +435,13 @@ public class DBRMStateStore extends RMStateStore {
   }
   
   private void logProvenance(ApplicationState state) throws StorageException {
+    if(state.getState() == null) {
+      //do nothing - not tracking this state
+      return;
+    }
     switch (RMAppState.valueOf(state.getState())) {
       case NEW:
+      case RUNNING:
       case FINISHED:
       case KILLED:
       case FAILED:
