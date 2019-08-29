@@ -111,6 +111,7 @@ public class INodeDirectory extends INodeWithAdditionalFields {
     if (copyFeatures) {
       this.features = other.features;
     }
+    this.metaEnabled = other.isMetaEnabled();
   }
   
   /**
@@ -690,5 +691,14 @@ public class INodeDirectory extends INodeWithAdditionalFields {
   public void increaseChildrenNum() throws StorageException, TransactionContextException{
     childrenNum++;
     save();
+  }
+  
+  @Override
+  INodeDirectory getMetaEnabledParent()
+      throws TransactionContextException, StorageException {
+    if(isMetaEnabled()){
+      return this;
+    }
+    return super.getMetaEnabledParent();
   }
 }

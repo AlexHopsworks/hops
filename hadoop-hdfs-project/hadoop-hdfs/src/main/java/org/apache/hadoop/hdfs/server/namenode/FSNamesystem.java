@@ -1458,6 +1458,9 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     try {
       //we just want to lock the subtree, the access check is done in the perform task.
       stoRootINode = lockSubtree(src, SubTreeOperation.Type.META_ENABLE_STO);
+      if (stoRootINode == null) {
+        throw new FileNotFoundException("Directory does not exist " + src);
+      }
       final AbstractFileTree.FileTree fileTree = buildTreeForLogging(stoRootINode,
           metaEnabled);
       new HopsTransactionalRequestHandler(HDFSOperationType.SET_META_ENABLED,
@@ -1517,26 +1520,36 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     } else {
       INodeDirectory dirNode = (INodeDirectory) targetNode;
       dirNode.setMetaEnabled(metaEnabled);
+      if (metaEnabled) {
+        dirNode.incrementLogicalTime();
+        INodeMetadataLogEntry dslogEntry =
+            new INodeMetadataLogEntry(dirNode.getId(),
+                dirNode.getId(), dirNode.getPartitionId(),
+                dirNode.getParentId(), dirNode.getLocalName(),
+                dirNode.getLogicalTime(),
+                INodeMetadataLogEntry.Operation.Add);
+        EntityManager.add(dslogEntry);
+      }
       EntityManager.update(dirNode);
     }
   
     if(metaEnabled) {
-      logMetadataEvents(fileTree,
-          INodeMetadataLogEntry.Operation.Add);
+      logMetadataEvents(fileTree);
     }
   }
 
-  private void logMetadataEvents(AbstractFileTree.FileTree fileTree,
-      INodeMetadataLogEntry.Operation operation) throws IOException {
+  private void logMetadataEvents(AbstractFileTree.FileTree fileTree) throws IOException {
     ProjectedINode dataSetDir = fileTree.getSubtreeRoot();
     Collection<INodeMetadataLogEntry> logEntries = new ArrayList<>(fileTree
         .getAllChildren().size());
     for (ProjectedINode node : fileTree.getAllChildren()) {
-      
+    
       node.incrementLogicalTime();
-      INodeMetadataLogEntry logEntry = new INodeMetadataLogEntry(dataSetDir.getId(),
-          node.getId(), node.getPartitionId(), node.getParentId(), node
-          .getName(), node.getLogicalTime(), operation);
+      INodeMetadataLogEntry logEntry =
+          new INodeMetadataLogEntry(dataSetDir.getId(),
+              node.getId(), node.getPartitionId(), node.getParentId(), node
+              .getName(), node.getLogicalTime(),
+              INodeMetadataLogEntry.Operation.Add);
       EntityManager.add(logEntry);
   
       if(node.getNumXAttrs() > 0){
@@ -1548,9 +1561,10 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
         //dummy log entry to update the logical time on the inode
         logEntry = new INodeMetadataLogEntry(dataSetDir.getId(),
             node.getId(), node.getPartitionId(), node.getParentId(), node
-            .getName(), node.getLogicalTime(), operation);
+            .getName(), node.getLogicalTime(),
+            INodeMetadataLogEntry.Operation.Add);
       }
-  
+    
       logEntries.add(logEntry);
     }
     AbstractFileTree.LoggingQuotaCountingFileTree.updateLogicalTime
