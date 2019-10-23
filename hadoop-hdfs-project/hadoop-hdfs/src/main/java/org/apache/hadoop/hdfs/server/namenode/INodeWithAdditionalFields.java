@@ -18,10 +18,12 @@
 package org.apache.hadoop.hdfs.server.namenode;
 
 import com.google.common.base.Preconditions;
+import io.hops.common.Pair;
 import io.hops.exception.StorageException;
 import io.hops.exception.TransactionContextException;
 import io.hops.metadata.hdfs.entity.FileProvXAttrBufferEntry;
 import io.hops.metadata.hdfs.entity.FileProvenanceEntry;
+import io.hops.metadata.hdfs.entity.INodeIdentifier;
 import io.hops.metadata.hdfs.entity.INodeMetadataLogEntry;
 import io.hops.security.GroupNotFoundException;
 import io.hops.security.UserNotFoundException;
@@ -34,6 +36,9 @@ import org.apache.hadoop.hdfs.DFSUtil;
 import java.io.IOException;
 import java.util.LinkedList;
 import java.util.Optional;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
 import org.apache.hadoop.fs.XAttr;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -337,63 +342,107 @@ public abstract class INodeWithAdditionalFields extends INode {
   }
   
   final static String PROV_PROJECTS = "Projects";
+  final static String[] PROV_HIVE = new String[]{"apps", "hive", "warehouse", "_featurestore.db"};
   final static int PROV_PROJECT = 4;
   final static int PROV_DATASET = 3;
   final static int PROV_PARENT_P1 = 2;
   final static int PROV_PARENT_P2 = 1;
   final static int PROV_PARENT_DIRECT = 0;
+  final static int PROV_PROJ_RETAINED_DIRS = PROV_PROJECT + 2; // "/Projects" + project + dataset + 2 dirs(ml)
+  final static int PROV_HIVE_RETAINED_DIRS = 6; // "/apps/hive/warehouse" + featurestore + featuregroup
+  final static int PROV_RETAINED_DIRS = Math.max(PROV_PROJ_RETAINED_DIRS, PROV_HIVE_RETAINED_DIRS);
   
-  public INodeDirectory[] provenanceDirs(INode inode) {
+  public Pair<TrackedProv, INodeDirectory[]> provenanceDirs(INode inode) {
     INodeDirectory[] provDirs = new INodeDirectory[]{null, null, null, null, null, null};
     LinkedList<INodeDirectory> aux = new LinkedList<>();
+  
+    Logger.getLogger(INode.class.getName()).log(Level.WARNING, "all - {0}", inode.getLocalName());
     
     try {
-      if(isRoot()) {
-        return provDirs;
+      if (inode.isRoot()) {
+        return new Pair<>(TrackedProv.OTHER, provDirs);
       }
       INodeDirectory current = inode.getParent();
       provDirs[PROV_PARENT_DIRECT] = current;
-      
+      if(current.isRoot()) {
+        return new Pair<>(TrackedProv.OTHER, provDirs);
+      }
+      aux.add(current);
+    
       //save the top 4 parents (we need lvl 2,3 dirs) - not root(0) or Projects(1)
       while (!current.isRoot()) {
         current = current.getParent();
         aux.add(current);
-        if(aux.size() > PROV_PROJECT + 2) {
+        if (aux.size() > PROV_RETAINED_DIRS) {
           aux.removeFirst();
         }
       }
-      if(aux.size() <= 1) {
-        return provDirs;
-      }
-      
       //drop root
-      aux.removeLast();
-      
-      if(aux.isEmpty() && PROV_PROJECTS.equals(provDirs[PROV_PARENT_DIRECT].getLocalName())) {
-        //project
-        return provDirs;
+      INodeDirectory rootI = aux.removeLast();
+  
+      for(INodeDirectory i : aux){
+        Logger.getLogger(INode.class.getName()).log(Level.WARNING, "all part - {0}", i.getLocalName());
       }
       
-      //check and drop Projects folder
-      if (!PROV_PROJECTS.equals(aux.removeLast().getLocalName())) { 
-        return provDirs;
-      }
+      //this is under root
       if(aux.isEmpty()) {
-        //dataset
-        provDirs[PROV_PROJECT] = provDirs[PROV_PARENT_DIRECT];
-        provDirs[PROV_DATASET] = (INodeDirectory)inode;
-        return provDirs;
+        return new Pair<>(TrackedProv.OTHER, provDirs);
       }
-      //check project as parent
-      provDirs[PROV_PROJECT] = aux.removeLast();
-      //check dataset as parent
-      provDirs[PROV_DATASET] = aux.isEmpty() ? provDirs[PROV_PARENT_DIRECT] : aux.removeLast();
-      provDirs[PROV_PARENT_P1] = aux.isEmpty() ? null : aux.removeLast();
-      provDirs[PROV_PARENT_P2] = aux.isEmpty() ? null : aux.removeLast();
-      return provDirs;
+      //this is a project
+      if (PROV_PROJECTS.equals(aux.getLast().getLocalName())) { //part of a project
+        //drop Projects folder
+        aux.removeLast();
+        if(aux.isEmpty()) { //project
+          provDirs[PROV_PROJECT] = (INodeDirectory) inode;
+          return new Pair<>(TrackedProv.PROJECT, provDirs);
+        }
+        provDirs[PROV_PROJECT] = aux.removeLast();
+        if (aux.isEmpty()) { //dataset
+          //dataset
+          provDirs[PROV_DATASET] = (INodeDirectory) inode;
+          return new Pair<>(TrackedProv.DATASET, provDirs);
+        } else {
+          //part of dataset
+          provDirs[PROV_DATASET] = aux.removeLast();
+          provDirs[PROV_PARENT_P1] = aux.isEmpty() ? null : aux.removeLast();
+          provDirs[PROV_PARENT_P2] = aux.isEmpty() ? null : aux.removeLast();
+          return new Pair<>(TrackedProv.DATASET, provDirs);
+        }
+      } else if(isHive(aux)) { //part of a featuregroup
+        Logger.getLogger(INode.class.getName()).log(Level.WARNING, "hive - {0}", inode.getLocalName());
+        
+        //remove hive prefix
+        aux.removeLast(); // PROV_HIVE[0] - apps
+        aux.removeLast(); // PROV_HIVE[1] - hive
+        aux.removeLast(); // PROV_HIVE[2] - warehouse
+  
+        provDirs[PROV_PROJECT] = null;
+        
+        if(aux.isEmpty()) {
+          provDirs[PROV_DATASET] = (INodeDirectory) inode;
+        } else {
+          provDirs[PROV_DATASET] = aux.removeLast();
+        }
+        provDirs[PROV_PARENT_P1] = aux.isEmpty() ? null : aux.removeLast();
+        provDirs[PROV_PARENT_P2] = aux.isEmpty() ? null : aux.removeLast();
+        return new Pair<>(TrackedProv.HIVE, provDirs);
+      } else {
+        for(INodeDirectory i : aux){
+          Logger.getLogger(INode.class.getName()).log(Level.WARNING, "other part - {0}", i.getLocalName());
+        }
+        Logger.getLogger(INode.class.getName()).log(Level.WARNING, "other - {0}", inode.getLocalName());
+        return new Pair<>(TrackedProv.OTHER, provDirs);
+      }
     } catch (IOException ex) {
       throw new RuntimeException("provenance log error3", ex);
     }
+  }
+  
+  private boolean isHive(LinkedList<INodeDirectory> parents) {
+    return parents.size() >= 3
+      && PROV_HIVE[0].equals(parents.get(parents.size()-1).getLocalName())
+      && PROV_HIVE[1].equals(parents.get(parents.size()-2).getLocalName())
+      && PROV_HIVE[2].equals(parents.get(parents.size()-3).getLocalName());
   }
   
   private boolean isProject(INodeDirectory[] parents) {
@@ -401,7 +450,7 @@ public abstract class INodeWithAdditionalFields extends INode {
       && PROV_PROJECTS.equals(parents[PROV_PARENT_DIRECT].getLocalName());
   }
   
-  private boolean isDatasetLvl(INodeDirectory[] parents) {
+  private boolean isDataset(INodeDirectory[] parents) {
     return parents[PROV_PARENT_DIRECT] != null && parents[PROV_PROJECT] != null
       && parents[PROV_PARENT_DIRECT].equals(parents[PROV_PROJECT])
       && isDirectory();
@@ -409,52 +458,94 @@ public abstract class INodeWithAdditionalFields extends INode {
       //&& ((INodeDirectory) this).isMetaEnabled();
   }
 
-  private boolean partOfDataset(INodeDirectory[] parents) {
+  private boolean isPartOfDataset(INodeDirectory[] parents) {
     return parents[PROV_DATASET] != null;
   }
   
   @Override
   public void logProvenanceEvent(FileProvenanceEntry.Operation op) {
-    INodeDirectory[] parents = provenanceDirs(this);
-//    if( isProject(parents) || isDatasetLvl(parents) || partOfDataset(parents)) {
-    if(isDatasetLvl(parents) || partOfDataset(parents)) {
-      switch(parents[PROV_DATASET].getMetaStatus()) {
-        case DISABLED:
-        case META_ENABLED:
-          return;
-        case MIN_PROV_ENABLED:
-          switch(op) {
-            case ACCESS_DATA:
-            case MODIFY_DATA:
-            case METADATA:
-            case OTHER:
-              return;
-          }
-      }
-      //if we are here we are tracking
-      Optional<XAttr> xattr = Optional.empty();
-      logProvenanceEvent(parents, op, xattr);
+    Pair<TrackedProv, INodeDirectory[]> parents = provenanceDirs(this);
+    switch(parents.getL()) {
+      case DATASET:
+      case HIVE:{
+        switch(parents.getR()[PROV_DATASET].getMetaStatus()) {
+          case FULL_PROV_ENABLED:
+            break;
+          case MIN_PROV_ENABLED:
+            switch(op) {
+              case CREATE:
+              case DELETE:
+                break;
+              case XATTR_ADD:
+              case XATTR_UPDATE:
+              case XATTR_DELETE:
+                return; // these should be intercepted in the xattr call
+              default: return;
+            } break;
+          default:
+            return;
+        }
+        //if we are here we are tracking
+        Optional<XAttr> xattr = Optional.empty();
+        logProvenanceEvent(parents.getL(), parents.getR(), op, xattr);
+      } break;
+      case PROJECT:
+      case OTHER:
+      default: return;
     }
   }
   
   @Override
   public void logProvenanceEvent(FileProvenanceEntry.Operation op, XAttr xattr) {
     if(XAttr.NameSpace.PROVENANCE.equals(xattr.getNameSpace())) {
-      INodeDirectory[] parents = provenanceDirs(this);
-      if(isDatasetLvl(parents) || partOfDataset(parents)) {
-        switch(parents[PROV_DATASET].getMetaStatus()) {
-          case DISABLED:
-          case META_ENABLED:
-            return;
-        }
-        //if we are here we are tracking
-        logProvenanceEvent(parents, op, Optional.of(xattr));
+      Pair<TrackedProv, INodeDirectory[]> parents = provenanceDirs(this);
+      switch(parents.getL()) {
+        case DATASET:
+        case HIVE:{
+          switch(parents.getR()[PROV_DATASET].getMetaStatus()) {
+            case FULL_PROV_ENABLED:
+            case MIN_PROV_ENABLED:
+              break;
+            default:
+              return;
+          }
+          //if we are here we are tracking
+          logProvenanceEvent(parents.getL(), parents.getR(), op, Optional.of(xattr));
+        } break;
+        case PROJECT:
+        case OTHER:
+        default: return;
       }
     }
   }
   
-  private void logProvenanceEvent(INodeDirectory[] parents, FileProvenanceEntry.Operation op, 
+  private enum TrackedProv {
+    PROJECT,
+    DATASET,
+    HIVE,
+    OTHER
+  }
+  private void logProvenanceEvent(TrackedProv type, INodeDirectory[] parents, FileProvenanceEntry.Operation op,
     Optional<XAttr> xattr) {
+  
+    Long projectIId;
+    String projectName;
+    switch(type) {
+      case DATASET: {
+        projectIId = parents[PROV_PROJECT].getId();
+        projectName = parents[PROV_PROJECT].getLocalName();
+      } break;
+      case HIVE: {
+        projectIId = -1l;
+        int idx = parents[PROV_DATASET].getLocalName().indexOf(PROV_HIVE[3]);
+        idx = (idx == -1) ? parents[PROV_DATASET].getLocalName().indexOf(".db") : idx;
+        idx = (idx == -1) ? parents[PROV_DATASET].getLocalName().length() : idx;
+        projectName = parents[PROV_DATASET].getLocalName().substring(0, idx);
+        Logger.getLogger(INode.class.getName()).log(Level.WARNING, "featurestore - {0}", projectName);
+      } break;
+      default: return;
+    }
+    
     UserGroupInformation ugi;
     int remoteUserId;
     String remoteUserName;
@@ -467,31 +558,30 @@ public abstract class INodeWithAdditionalFields extends INode {
     }
     String appId = ugi.getApplicationId();
     if(appId == null) {
-       appId = "notls";
+       appId = "none";
     }
     
     long timestamp = System.currentTimeMillis();
     String p1Name = parents[PROV_PARENT_P1] != null ? parents[PROV_PARENT_P1].getLocalName() : "";
     String p2Name = parents[PROV_PARENT_P2] != null ? parents[PROV_PARENT_P2].getLocalName() : "";
     
+    String xattrName = xattr.isPresent() ? xattr.get().getName() : "";
+  
+    FileProvenanceEntry ple = new FileProvenanceEntry(id, op, logicalTime, timestamp, appId, remoteUserId,
+      partitionId,
+      projectIId, parents[PROV_DATASET].getId(), parents[PROV_PARENT_DIRECT].getId(),
+      getLocalName(), projectName, parents[PROV_DATASET].getLocalName(),
+      p1Name, p2Name, parents[PROV_PARENT_DIRECT].getLocalName(),
+      remoteUserName, xattrName, logicalTime, timestamp, parents[PROV_DATASET].getLogicalTime());
+    
     try {
       if (xattr.isPresent()) {
         byte xattrNamespace = xattr.get().getNameSpace().getId();
-        String xattrName = xattr.get().getName();
         byte[] xattrValue = xattr.get().getValue();
-        FileProvXAttrBufferEntry xattrEntry 
+        FileProvXAttrBufferEntry xattrEntry
           = new FileProvXAttrBufferEntry(id, xattrNamespace, xattrName, logicalTime, xattrValue);
         EntityManager.add(xattrEntry);
       }
-      String xattrName = xattr.isPresent() ? xattr.get().getName() : "";
-  
-      FileProvenanceEntry ple = new FileProvenanceEntry(id, op, logicalTime, timestamp, appId, remoteUserId,
-        partitionId,
-        parents[PROV_PROJECT].getId(), parents[PROV_DATASET].getId(), parents[PROV_PARENT_DIRECT].getId(),
-        getLocalName(), parents[PROV_PROJECT].getLocalName(), parents[PROV_DATASET].getLocalName(),
-        p1Name, p2Name, parents[PROV_PARENT_DIRECT].getLocalName(),
-        remoteUserName, xattrName, logicalTime, timestamp, parents[PROV_DATASET].getLogicalTime());
-
       EntityManager.add(ple);
     } catch (IOException ex) {
       throw new RuntimeException("provenance log error3", ex);
