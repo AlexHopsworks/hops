@@ -24,7 +24,6 @@ import io.hops.security.UsersGroups;
 import io.hops.transaction.EntityManager;
 import org.apache.hadoop.fs.XAttr;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.util.Time;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
@@ -151,8 +150,12 @@ public class FileProvenance {
     long timestamp = System.currentTimeMillis();
     String p1Name = parents[ProvParents.PARENT_P1.ordinal()] != null
       ? parents[ProvParents.PARENT_P1.ordinal()].getLocalName() : "";
+    Long p1Id = parents[ProvParents.PARENT_P1.ordinal()] != null
+      ? parents[ProvParents.PARENT_P1.ordinal()].getId() : -1;
     String p2Name = parents[ProvParents.PARENT_P2.ordinal()] != null
       ? parents[ProvParents.PARENT_P2.ordinal()].getLocalName() : "";
+    Long p2Id = parents[ProvParents.PARENT_P2.ordinal()] != null
+      ? parents[ProvParents.PARENT_P2.ordinal()].getId() : -1;
     
     String xattrName = xattr.isPresent() ? xattr.get().getName() : "";
     byte[] xattrVal = xattr.isPresent() ? xattr.get().getValue() : null;
@@ -161,7 +164,7 @@ public class FileProvenance {
       appId, remoteUserId, tieBreaker, inode.getPartitionId(), projectIId,
       parents[ProvParents.DATASET.ordinal()].getId(), parents[ProvParents.PARENT_DIRECT.ordinal()].getId(),
       inode.getLocalName(), projectName, parents[ProvParents.DATASET.ordinal()].getLocalName(),
-      p1Name, p2Name, parents[ProvParents.PARENT_DIRECT.ordinal()].getLocalName(),
+      p1Name, p1Id, p2Name, p2Id, parents[ProvParents.PARENT_DIRECT.ordinal()].getLocalName(),
       remoteUserName, xattrName, inode.getLogicalTime(), timestamp,
       parents[ProvParents.DATASET.ordinal()].getLogicalTime(), xattrVal);
     
